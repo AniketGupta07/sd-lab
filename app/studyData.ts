@@ -42,75 +42,111 @@ export type StandardQuestion = {
 export const curriculumWeeks: WeekPlan[] = [
   {
     week: 1,
-    title: "Foundations & estimation",
+    title: "Scale, guarantees & replication",
     tier: 0,
-    focus: "Build fast intuition for scale, guarantees, data movement, storage engines, and overload behavior.",
-    topics: ["Latency and capacity", "Consistency", "Replication", "Networking", "Caching and logs", "Storage internals"],
-    designs: ["URL shortener", "Distributed rate limiter"],
-    hours: "8–10 h",
+    focus: "Build fast intuition for capacity, consistency guarantees per operation, replication ownership, and the request path.",
+    topics: ["Latency and capacity", "Consistency", "Idempotency", "Replication", "Consensus", "Networking"],
+    designs: ["URL shortener"],
+    hours: "5–6 h",
   },
   {
     week: 2,
-    title: "Read-heavy & real-time systems",
-    tier: 1,
-    focus: "Reason about fan-out, persistent connections, per-entity ordering, presence, pagination, and freshness.",
-    topics: ["Fan-out", "Ranking", "WebSockets", "Ordering", "Presence", "Pagination"],
-    designs: ["Newsfeed", "Chat system"],
-    hours: "8–10 h",
+    title: "Storage, caching & identity",
+    tier: 0,
+    focus: "Choose storage engines and caches from access patterns, then establish who the caller is and what they may do.",
+    topics: ["Caching", "Queues and logs", "Storage engines", "Indexing", "Authentication", "Authorization"],
+    designs: ["Distributed rate limiter"],
+    hours: "5–6 h",
   },
   {
     week: 3,
-    title: "Stateful & asynchronous systems",
+    title: "Coordination & conflict",
     tier: 1,
-    focus: "Design idempotent workflows that survive ambiguous outcomes, retries, reconciliation, and partial failure.",
-    topics: ["State machines", "Ledgers", "Outbox and sagas", "Reconciliation", "Notifications", "File sync"],
-    designs: ["Payment ledger", "Notification system", "File storage and sync"],
-    hours: "9–11 h",
+    focus: "Survive partial failure: atomic commitment, compensation, causality, conflict resolution, membership, and reconciliation.",
+    topics: ["2PC and sagas", "Vector clocks", "CRDTs", "Outbox", "Gossip and discovery", "Reconciliation"],
+    designs: ["Unique ID Service"],
+    hours: "6–7 h",
   },
   {
     week: 4,
-    title: "Geo, search & observability",
+    title: "Read-heavy & real-time systems",
     tier: 1,
-    focus: "Explore spatial indexing, crawling, search serving, high-cardinality telemetry, multi-region recovery, and SLOs.",
-    topics: ["Spatial indexes", "Crawl frontier", "Inverted indexes", "Metrics pipelines", "Multi-region", "Graceful degradation"],
-    designs: ["Nearby service", "Web crawler and search", "Observability platform"],
-    hours: "9–11 h",
+    focus: "Reason about fan-out, ranking, pagination, persistent connections, and per-entity ordering.",
+    topics: ["Fan-out", "Ranking", "Pagination", "WebSockets", "Ordering", "Delivery"],
+    designs: ["Newsfeed or Timeline"],
+    hours: "5–6 h",
   },
   {
     week: 5,
-    title: "ML system design foundations",
-    tier: 2,
-    focus: "Connect product objectives to labels, point-in-time features, retrieval, ranking, evaluation, and serving.",
-    topics: ["Problem framing", "Metrics", "Labels", "Feature platforms", "Candidate generation", "Ranking", "Training and evaluation"],
-    designs: ["Recommendation feed", "Search ranking"],
-    hours: "9–11 h",
+    title: "Stateful & asynchronous systems",
+    tier: 1,
+    focus: "Design ledgers, presence, notification orchestration, and large-object ingestion that survive ambiguous outcomes.",
+    topics: ["Presence", "Ledgers", "Notifications", "Multipart upload", "Content addressing", "Idempotent effects"],
+    designs: ["Chat and Messaging", "Payment and Ledger System"],
+    hours: "6–7 h",
   },
   {
     week: 6,
-    title: "High-stakes ML & experimentation",
-    tier: 2,
-    focus: "Handle imbalance, delayed labels, calibration, drift, causal experiments, guarded rollout, and feedback loops.",
-    topics: ["Calibration", "Delayed labels", "Drift", "A/B testing", "Canary and rollback", "Feedback loops"],
-    designs: ["Fraud detection", "Content moderation", "Ads CTR"],
-    hours: "9–11 h",
+    title: "Sync, geo & search",
+    tier: 1,
+    focus: "Handle offline conflicts, spatial indexing and its privacy duties, crawling, and incremental index serving.",
+    topics: ["File sync", "Spatial indexes", "Crawl frontier", "Politeness", "Inverted indexes", "Segment merging"],
+    designs: ["File Storage and Synchronization", "Nearby-Location Service"],
+    hours: "6–7 h",
   },
   {
     week: 7,
-    title: "LLM & training infrastructure",
-    tier: 3,
-    focus: "Balance memory, throughput, latency, retrieval quality, distributed training, evaluation, safety, and cost.",
-    topics: ["Inference execution", "GPU scheduling", "Serving optimization", "Distributed training", "RAG", "Post-training", "Evaluation and safety"],
-    designs: ["Enterprise RAG", "Inference gateway", "Post-training platform", "Evaluation platform"],
-    hours: "10–12 h",
+    title: "Observability, SLOs & first mocks",
+    tier: 1,
+    focus: "Instrument high-cardinality telemetry, define SLOs and degradation, plan regional recovery, then run a timed classic mock.",
+    topics: ["Cardinality", "Retention", "SLOs", "Backpressure", "Multi-region", "Interview clock"],
+    designs: ["Web Crawler and Search Index", "Observability Platform"],
+    hours: "7–8 h",
   },
   {
     week: 8,
-    title: "Timed mock interviews",
+    title: "ML system design foundations",
+    tier: 2,
+    focus: "Connect a product decision to targets, labels with point-in-time correctness, and a feature platform without skew.",
+    topics: ["Problem framing", "Metrics and slices", "Labels", "Leakage", "Feature stores", "Training-serving skew"],
+    designs: ["Recommendation feed"],
+    hours: "5–6 h",
+  },
+  {
+    week: 9,
+    title: "Retrieval, ranking & calibration",
+    tier: 2,
+    focus: "Build two-stage retrieval and ranking, then make probabilities and thresholds usable as decisions.",
+    topics: ["ANN and HNSW", "Two-stage ranking", "Position bias", "Registry", "Calibration", "Delayed labels"],
+    designs: ["Search ranking", "Ads click-through-rate prediction"],
+    hours: "6–7 h",
+  },
+  {
+    week: 10,
+    title: "Experimentation & safe rollout",
+    tier: 2,
+    focus: "Measure impact trustworthily, roll out with guardrails, monitor drift and feedback loops, then run an ML mock.",
+    topics: ["A/B testing", "SRM", "Interference", "Canary and rollback", "Drift", "Feedback loops"],
+    designs: ["Real-time fraud detection", "Content moderation"],
+    hours: "6–7 h",
+  },
+  {
+    week: 11,
+    title: "LLM inference & training infrastructure",
     tier: 3,
-    focus: "Convert knowledge into coherent, spoken 40–45 minute designs with evidence-based self-critique.",
-    topics: ["Time control", "Classic synthesis", "ML synthesis", "LLM synthesis", "Mistake remediation", "10× evolution"],
-    designs: ["2 classic mocks", "2 ML mocks", "2 LLM infrastructure mocks"],
-    hours: "8–10 h",
+    focus: "Balance KV memory, batching, parallelism, and retrieval quality across serving and distributed training.",
+    topics: ["Prefill and decode", "KV cache", "Continuous batching", "Paged attention", "Parallelism", "RAG"],
+    designs: ["Large-scale LLM serving", "Enterprise RAG assistant"],
+    hours: "7–8 h",
+  },
+  {
+    week: 12,
+    title: "LLM operations & final mocks",
+    tier: 3,
+    focus: "Close post-training, evaluation, safety, and cost, then convert everything into spoken 40–45 minute designs.",
+    topics: ["Post-training", "Evaluation", "Judges", "Prompt injection", "Unit economics", "Executive close"],
+    designs: ["Multi-model inference gateway", "Post-training platform"],
+    hours: "7–8 h",
   },
 ];
 
@@ -124,13 +160,13 @@ function assertStudyContent(condition: unknown, message: string): asserts condit
 }
 
 function validateStudyContent(topics: StudyTopic[], prompts: DesignPrompt[]) {
-  assertStudyContent(topics.length === 49, "the complete syllabus must contain 49 modules");
+  assertStudyContent(topics.length === 53, "the complete syllabus must contain 53 modules");
   assertStudyContent(prompts.length === 25, "the design library must contain 25 prompts");
   assertStudyContent(new Set(topics.map((topic) => topic.id)).size === topics.length, "topic IDs must be unique");
   assertStudyContent(new Set(prompts.map((prompt) => prompt.id)).size === prompts.length, "prompt IDs must be unique");
 
-  const expectedWeekCounts = [7, 5, 6, 6, 7, 5, 7, 6];
-  for (let week = 1; week <= 8; week += 1) {
+  const expectedWeekCounts = [4, 4, 5, 4, 4, 4, 5, 4, 5, 4, 5, 5];
+  for (let week = 1; week <= 12; week += 1) {
     assertStudyContent(topics.filter((topic) => topic.week === week).length === expectedWeekCounts[week - 1], `week ${week} module count is incomplete`);
   }
 
@@ -147,6 +183,11 @@ function validateStudyContent(topics: StudyTopic[], prompts: DesignPrompt[]) {
     assertStudyContent(topic.failureModes.length >= 3, `${topic.id} needs three diagnosed failure modes`);
     assertStudyContent(topic.decisionChecklist.length >= 4, `${topic.id} needs a decision checklist`);
     assertStudyContent(topic.quiz.length >= 2, `${topic.id} needs two recall checks`);
+    assertStudyContent(topic.recallCards.length >= 2, `${topic.id} needs two free-recall cards`);
+    for (const card of topic.recallCards) {
+      assertStudyContent(card.prompt.length >= 40, `${topic.id} recall prompt is too thin`);
+      assertStudyContent(card.answer.length >= 200, `${topic.id} recall answer must be a full model answer`);
+    }
     for (const question of topic.quiz) {
       assertStudyContent(question.options.length >= 3, `${topic.id} quiz needs plausible options`);
       assertStudyContent(question.answerIndex >= 0 && question.answerIndex < question.options.length, `${topic.id} quiz answer is invalid`);

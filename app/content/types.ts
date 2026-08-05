@@ -26,6 +26,17 @@ export type QuizQuestion = {
   explanation: string;
 };
 
+/**
+ * A free-recall card. Unlike the multiple-choice quiz, nothing is shown to
+ * choose between: you answer from memory, reveal, then grade yourself. This is
+ * the retrieval practice that recognition-based questions cannot provide.
+ */
+export type RecallCard = {
+  id: string;
+  prompt: string;
+  answer: string;
+};
+
 export type StudyTopic = {
   id: string;
   week: number;
@@ -47,6 +58,7 @@ export type StudyTopic = {
   prerequisites: string[];
   relatedDesigns: string[];
   quiz: QuizQuestion[];
+  recallCards: RecallCard[];
   furtherReading?: Array<{ label: string; url: string }>;
 };
 

@@ -61,6 +61,10 @@ export const foundationTopics: StudyTopic[] = [
       { prompt: "At 20,000 requests/s and 80 ms average time inside the request-processing boundary, what is the average number of requests in that boundary?", options: ["250", "1,600", "20,080", "250,000"], answerIndex: 1, explanation: "Little’s Law: 20,000/s × 0.08 s = 1,600 requests on average inside the measured boundary." },
       { prompt: "Which number should drive cache sizing?", options: ["Total historical dataset", "Average object size only", "Hot working set during the design horizon plus overhead", "Daily write QPS"], answerIndex: 2, explanation: "A cache must hold enough of the active working set to achieve the assumed hit rate, including replication and allocator overhead." },
     ],
+    recallCards: [
+      { id: "est-littles-law", prompt: "State Little's Law, the condition it requires, and the mistake people make when applying it to a request path.", answer: "For a stable system, L = throughput x average time spent inside a stated boundary. It holds only in steady state and only for the boundary you actually measured. The common mistake is mixing boundaries: counting queued in-flight requests requires the total time including queueing, whereas service time alone gives only the actively-serviced concurrency. Naming the boundary before multiplying is what makes the number mean anything." },
+      { id: "est-amplification", prompt: "Given a logical write volume, list the sources of physical amplification you must add before sizing storage.", answer: "Replication factor, secondary indexes, metadata, compaction slack and space amplification, erasure-coding overhead, and retained backup or snapshot copies. Separately, a single logical write may fan out to replicas, indexes, caches, event streams, and analytics, and a feed write may fan out to thousands of inboxes. Keep logical and physical numbers on separate lines so the amplification factor stays visible and arguable." },
+    ],
   },
   {
     id: "consistency-idempotency",
@@ -122,6 +126,10 @@ export const foundationTopics: StudyTopic[] = [
       { prompt: "A client times out after payment creation and retries with the same idempotency key but a different amount. What should the API do?", options: ["Create a second payment", "Overwrite the original request", "Reject the key reuse because the payload hash differs", "Wait for the key to expire"], answerIndex: 2, explanation: "The key identifies one logical operation. Reuse with different semantics must be rejected to prevent accidental aliasing." },
       { prompt: "Why is a lease alone insufficient for exclusive writes?", options: ["Leases cannot be replicated", "A paused holder may resume after expiry", "Clocks are always synchronized", "Leases require UDP"], answerIndex: 1, explanation: "A process can pause beyond its lease, then resume unaware that a new owner exists. The resource needs a fencing epoch." },
     ],
+    recallCards: [
+      { id: "con-lin-vs-ser", prompt: "Distinguish linearizability from serializability, and explain why a database can offer one without the other.", answer: "Linearizability is a real-time ordering guarantee on individual operations: once a write completes, every later read observes it. Serializability is an isolation guarantee that a set of transactions is equivalent to some serial order, with no requirement that the order match real time. A database can therefore provide serializable transactions while a read issued after a commit still misses it, because nothing ties the serial order to wall-clock ordering. Strict serializability is the combination of both." },
+      { id: "con-idempotency-key", prompt: "Describe what an idempotency key must be bound to, what is stored with it, and how concurrent duplicates are handled.", answer: "Bind the key to caller, operation, and a hash of the normalized payload. Atomically persist the key, payload hash, state, and the eventual response in the same transaction as the business mutation, so the record cannot exist without the effect or vice versa. Concurrent duplicates must converge on one result, typically by having the loser wait on or read the winner's record. Reuse of the key with a different payload hash must be rejected rather than aliased, and keys are retained through the maximum retry and dispute window." },
+    ],
     furtherReading: [{ label: "Herlihy & Wing — Linearizability", url: "https://cs.brown.edu/~mph/HerlihyW90/p463-herlihy.pdf" }],
   },
   {
@@ -137,7 +145,7 @@ export const foundationTopics: StudyTopic[] = [
     objectives: ["Distinguish consensus quorums from Dynamo-style quorums", "Select keys from access patterns and cardinality", "Narrate a safe reshard and regional failover"],
     concepts: ["Leader-follower", "Consensus log", "Term/epoch", "Leaderless quorum", "Consistent hashing", "Virtual node", "Hot partition", "Resharding"],
     deepDive: [
-      { title: "Replication models", summary: "Replication semantics determine write ownership and conflict behavior.", points: ["In Raft, an entry from the leader’s current term becomes committed once replicated to a majority; quorum intersection plus the election log-freshness rule ensures later leaders contain committed entries.", "For fixed replica membership, R + W > N gives read/write quorum intersection, but not linearizability by itself; ordering versions and returning the latest completed write require an additional protocol. Sloppy quorums and asynchronous read repair weaken that guarantee.", "Multi-leader accepts writes in multiple sites and therefore needs deterministic conflict resolution, domain-specific merge, or user-visible conflicts. Last-write-wins can silently discard updates under clock skew."] },
+      { title: "Replication models", summary: "Replication semantics determine write ownership and conflict behavior.", points: ["In Raft, an entry from the leader’s current term becomes committed once replicated to a majority; quorum intersection plus the election log-freshness rule ensures later leaders contain committed entries.", "For fixed replica membership, R + W > N gives read/write quorum intersection, but not linearizability by itself; ordering versions and returning the latest completed write require an additional protocol. Sloppy quorums and asynchronous read repair weaken that guarantee.", "Multi-leader accepts writes in multiple sites and therefore needs deterministic conflict resolution, domain-specific merge, or user-visible conflicts. Last-write-wins can silently discard updates under clock skew.", "Paxos solves consensus on a single value through prepare/accept rounds with proposal numbers; Multi-Paxos amortizes the prepare phase across a stable leader, which is structurally what Raft prescribes with terms and an explicit log. Raft is not a different guarantee—it is the same safety made teachable by fixing leadership and log contiguity, which is why production systems built on either converge on a leader-based replicated log."] },
       { title: "Partition from access patterns", summary: "A high-cardinality key is necessary but not sufficient.", points: ["Hash partitioning spreads point traffic but loses range locality; range partitioning supports scans but concentrates sequential inserts and popular ranges.", "Co-locate data that must be transacted or read together, but avoid a tenant or celebrity key whose rate exceeds one partition’s capacity.", "Secondary indexes are local or global: local indexes scatter queries; global indexes add an asynchronously or transactionally maintained partitioned structure."] },
       { title: "Move ownership safely", summary: "Resharding is a protocol, not a metadata edit.", points: ["Introduce a new routing epoch, copy a consistent snapshot, stream the change log, validate lag/checksums, cut reads and writes, and retain rollback state.", "Clients and routers must tolerate stale maps via redirects or retries; fencing prevents an old owner from accepting writes after cutover.", "Throttle movement to protect foreground traffic. A failed node and its replicas must not all rebuild through the same constrained network link."] },
     ],
@@ -159,6 +167,10 @@ export const foundationTopics: StudyTopic[] = [
     quiz: [
       { prompt: "Why does a Raft entry committed in its leader’s current term survive leader change?", options: ["Every replica has every entry", "Majority intersection plus the election log-freshness rule", "The leader’s clock is authoritative", "Followers cannot fail"], answerIndex: 1, explanation: "The election quorum intersects the commit quorum, and Raft’s voting freshness rule prevents a candidate missing the committed log suffix from winning." },
       { prompt: "Which migration step closes the gap between a copied snapshot and current writes?", options: ["Longer cache TTL", "Change-log catch-up under an ownership epoch", "Random reads", "DNS failover"], answerIndex: 1, explanation: "A snapshot plus ordered change stream brings the destination current before fenced cutover." },
+    ],
+    recallCards: [
+      { id: "rep-raft-commit", prompt: "State Raft's commit rule precisely and explain why the current-term qualifier matters.", answer: "An entry from the leader's current term is committed once it is replicated to a majority; entries from earlier terms are committed only indirectly, once an entry of the current term commits above them. The qualifier matters because a majority-replicated entry from a previous term can still be overwritten by a later leader, which is the figure-8 scenario Raft explicitly rules out. Safety comes from quorum intersection plus the election rule that a candidate missing committed entries cannot win." },
+      { id: "rep-quorum-limit", prompt: "Explain what R + W > N does and does not guarantee.", answer: "With fixed replica membership it guarantees that read and write quorums intersect, so a read set contains at least one replica that saw the latest completed write. It does not by itself give linearizability: you additionally need version ordering and a rule for returning the latest completed write, and concurrent writes can still produce siblings. Sloppy quorums with hinted handoff and asynchronous read repair weaken the intersection property further, so the inequality alone is not a consistency guarantee." },
     ],
     furtherReading: [{ label: "Raft consensus paper", url: "https://raft.github.io/raft.pdf" }, { label: "Dynamo paper", url: "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" }],
   },
@@ -198,12 +210,16 @@ export const foundationTopics: StudyTopic[] = [
       { prompt: "A three-hop call stack allows three total attempts at every hop. Roughly how many leaf attempts can one request create?", options: ["3", "6", "9", "27"], answerIndex: 3, explanation: "Independent attempt budgets multiply: 3 × 3 × 3 = 27 leaf attempts. Centralize retry ownership and budget it." },
       { prompt: "What is the safest response to overload for nonessential work?", options: ["Add an unbounded queue", "Reject early with retry guidance and bounded admission", "Disable timeouts", "Retry immediately"], answerIndex: 1, explanation: "Bounded admission preserves useful work and prevents queueing collapse; clients should retry only with budget and jitter." },
     ],
+    recallCards: [
+      { id: "net-deadline", prompt: "Explain end-to-end deadline propagation and why independent per-hop timeouts are worse.", answer: "The edge sets one deadline for the whole request; each hop subtracts elapsed time plus a reserve before calling downstream, and cancels work when the deadline passes. Independent per-hop timeouts let a downstream hop keep working long after the caller has given up, burning capacity on results nobody will read, and they make the worst-case total the sum of every hop's timeout rather than a bounded budget." },
+      { id: "net-retry-amplify", prompt: "Show how retries amplify across layers and state the mitigations.", answer: "Independent attempt budgets multiply: three hops each allowing three attempts yields up to 27 leaf attempts from one request, so a slow dependency sees load multiply exactly when it is least able to absorb it. Mitigate by choosing a single retry owner rather than retrying at every layer, enforcing a fleet-wide retry budget as a fraction of traffic, using exponential backoff with jitter, and propagating deadlines so a doomed request stops early." },
+    ],
     furtherReading: [{ label: "HTTP/2 specification (RFC 9113)", url: "https://www.rfc-editor.org/rfc/rfc9113" }],
   },
   {
     id: "caching-queues",
-    week: 1,
-    day: 5,
+    week: 2,
+    day: 1,
     tier: 0,
     title: "Caching, logs & backpressure",
     eyebrow: "Control repeated and deferred work",
@@ -214,7 +230,7 @@ export const foundationTopics: StudyTopic[] = [
     concepts: ["Cache-aside", "Write-through", "Request coalescing", "Partitioned log", "Consumer group", "At-least-once", "Dead-letter", "Backpressure"],
     deepDive: [
       { title: "Treat cache entries as derived state", summary: "Freshness is a contract, not merely a TTL.", points: ["Cache-aside reads source on miss and populates; concurrent misses need request coalescing or probabilistic early refresh to avoid a stampede.", "Invalidation should carry a version when reordering is possible. A late invalidation or old fill must not overwrite a newer cached value.", "Negative caching protects repeated misses but needs shorter TTLs and invalidation on creation. Hot keys may require replication, local near-caches, or request collapsing."] },
-      { title: "Choose queue or log by consumption semantics", summary: "Work distribution and event history are different abstractions.", points: ["A task queue transfers ownership of work and often deletes after acknowledgment. A durable log retains ordered records and lets independent consumer groups track offsets and replay.", "Ordering is normally per partition, not global. The partition key must match the entity whose events need order; more partitions improve parallelism but weaken ordering scope.", "Acknowledgment after side effect avoids loss but permits duplicate delivery after a crash. The consumer must make the effect idempotent before advancing its durable position."] },
+      { title: "Choose queue or log by consumption semantics", summary: "Work distribution and event history are different abstractions.", points: ["A task queue transfers ownership of work and often deletes after acknowledgment (RabbitMQ, SQS). A durable partitioned log retains ordered records and lets independent consumer groups track offsets and replay (Kafka, Pulsar, Kinesis). Name the semantics you need before naming the product.", "Ordering is normally per partition, not global. The partition key must match the entity whose events need order; more partitions improve parallelism but weaken ordering scope.", "Acknowledgment after side effect avoids loss but permits duplicate delivery after a crash. The consumer must make the effect idempotent before advancing its durable position."] },
       { title: "Backpressure spans the entire path", summary: "A broker defers overload; it does not remove it.", points: ["Track lag in time, not only message count, because event value and processing cost vary. Define when work becomes too stale to execute.", "A retry topic delays a failed record and lets the main partition advance, but sacrifices strict per-key order unless later records are sequence-gated or the partition remains paused. Poison records still need owned quarantine and safe replay.", "Producers need admission, quotas, or degradation when consumers cannot catch up. Otherwise retained backlog eventually exhausts disk and recovery time." ] },
     ],
     tradeoffs: [
@@ -236,11 +252,15 @@ export const foundationTopics: StudyTopic[] = [
       { prompt: "A consumer writes to a database and crashes before acknowledging. What must the design expect?", options: ["The event is lost", "The event may be delivered again", "The broker rolls back the database", "Global order is restored"], answerIndex: 1, explanation: "Acknowledgment did not persist, so an at-least-once broker redelivers. The database effect must be idempotent." },
       { prompt: "What should determine a stream partition key?", options: ["Alphabetical order", "The entity boundary that needs ordered processing", "The largest payload", "The current consumer count"], answerIndex: 1, explanation: "Events for the same stateful entity belong to the same ordered partition; independent entities can be parallelized." },
     ],
+    recallCards: [
+      { id: "cache-stampede", prompt: "Describe what happens when a hot key expires under load and the mitigations.", answer: "Every concurrent request misses simultaneously and stampedes the origin, which can be far more load than steady state and can cascade into a full outage. Mitigate with request coalescing so one filler populates the entry while others wait, probabilistic or jittered early expiry so keys do not expire in lockstep, serving stale while revalidating in the background, and admission limits on origin fills. The cache must also be sized against the hot working set, not the whole dataset." },
+      { id: "cache-queue-vs-log", prompt: "Contrast a task queue with a durable partitioned log by consumption semantics.", answer: "A task queue transfers ownership of a unit of work and typically deletes it after acknowledgment, so there is one logical consumer and no history. A durable partitioned log retains an ordered sequence and lets independent consumer groups track their own offsets and replay from any point, which is what enables adding a new consumer or reprocessing after a bug. Ordering in a log is per partition, not global, so the partition key must match the entity whose events require order." },
+    ],
   },
   {
     id: "storage-indexing",
-    week: 1,
-    day: 6,
+    week: 2,
+    day: 2,
     tier: 0,
     title: "Storage engines & indexing",
     eyebrow: "Access patterns choose the database",
@@ -252,9 +272,10 @@ export const foundationTopics: StudyTopic[] = [
     deepDive: [
       { title: "Select from query and mutation shape", summary: "Begin with authoritative entities and dominant access paths.", points: ["Relational storage fits transactional invariants and indexed joins; key-value or wide-column storage fits predictable partition-key access at large scale; object storage fits immutable large blobs.", "Search indexes and vector indexes are derived serving structures, not usually the system of record. Rebuild them from versioned source data and an ordered change stream.", "Columnar analytical stores minimize scans through projection and compression; mixing long scans with latency-sensitive transactions causes resource interference."] },
       { title: "Understand the physical write path", summary: "B-trees and LSM trees move cost to different phases.", points: ["A conventional WAL-based B+ tree updates sorted pages in place, serving point/range reads predictably but causing random I/O and page splits under writes; copy-on-write variants move the durability cost differently.", "An LSM tree appends to a log and memtable, flushes immutable sorted runs, then compacts them. It trades high write throughput for read and space amplification plus background I/O.", "Bloom filters rule out absent keys probabilistically and reduce run reads; they never prove presence and false-positive rate costs memory."] },
-      { title: "Treat indexes as derived views", summary: "Each index improves one query by taxing writes, storage, and consistency.", points: ["A composite index follows its leading columns; order fields by equality/range and sort requirements, not by schema aesthetics.", "A global secondary index must be partitioned and maintained. If asynchronous, queries need defined lag and repair; if transactional, writes pay coordination.", "Retention and deletion interact with compaction, snapshots, backups, search copies, and embeddings. A tombstone is not immediate physical erasure." ] },
+      { title: "Treat indexes as derived views", summary: "Each index improves one query by taxing writes, storage, and consistency.", points: ["A composite index follows its leading columns; order fields by equality/range and sort requirements, not by schema aesthetics.", "A global secondary index must be partitioned and maintained. If asynchronous, queries need defined lag and repair; if transactional, writes pay coordination.", "Retention and deletion interact with compaction, snapshots, backups, search copies, and embeddings. A tombstone is not immediate physical erasure.", "A regulatory erasure request (GDPR right to erasure, CCPA deletion) must reach every derived copy: caches, search indexes, analytical warehouses, embeddings, backups, and logs. Track a deletion through a durable request record with per-sink completion, and prefer crypto-shredding a per-subject key where a backup cannot be rewritten." ] },
     ],
     tradeoffs: [
+      { decision: "Relational vs non-relational", preferA: "Choose relational when the workload needs multi-row transactions, evolving ad-hoc queries, joins, and declarative constraints enforced by the engine.", preferB: "Choose a non-relational engine when one dominant access pattern, horizontal write scale, or a flexible/sparse shape outweighs those guarantees.", watch: "“SQL vs NoSQL” is not a decision—name the access pattern, the invariant, and the scale that force the choice, since managed relational engines now shard and non-relational engines now offer transactions." },
       { decision: "B-tree vs LSM", preferA: "B-tree for predictable point/range reads and moderate writes.", preferB: "LSM for sustained write throughput and sequential I/O.", watch: "Compaction can produce latency cliffs and temporary space amplification." },
       { decision: "Normalized vs denormalized", preferA: "Normalize authoritative transactional data and evolving relations.", preferB: "Denormalize stable serving views for bounded read latency.", watch: "Every copy needs freshness, repair, and deletion semantics." },
       { decision: "Synchronous vs asynchronous secondary index", preferA: "Synchronous when a query participates in a correctness invariant.", preferB: "Asynchronous for scalable discovery/search with explicit lag.", watch: "Do not read an async index to enforce uniqueness." },
@@ -273,12 +294,16 @@ export const foundationTopics: StudyTopic[] = [
       { prompt: "What does an LSM Bloom filter tell the reader?", options: ["The key is definitely present", "The key is definitely absent when the filter says absent", "The newest value", "Which replica is leader"], answerIndex: 1, explanation: "Bloom filters have false positives but no false negatives under correct construction; ‘absent’ avoids checking that run." },
       { prompt: "Why should an async search index not enforce username uniqueness?", options: ["Search cannot store strings", "Index lag allows concurrent duplicates", "Search indexes are always in memory", "Uniqueness needs compression"], answerIndex: 1, explanation: "An eventually updated index can miss a just-created value. Enforce the invariant transactionally at the source of truth." },
     ],
+    recallCards: [
+      { id: "store-btree-lsm", prompt: "Compare B-tree and LSM read/write paths and their characteristic operational risk.", answer: "A B-tree updates pages in place, giving predictable point and range reads and bounded read amplification, but random write I/O and page-level write amplification. An LSM buffers writes in memory and flushes sorted runs, giving high sequential write throughput at the cost of read amplification across levels, mitigated by bloom filters. The LSM's characteristic risk is compaction: it competes with foreground I/O and produces periodic latency cliffs and temporary space amplification." },
+      { id: "store-erasure", prompt: "Explain why a tombstone is not erasure and what a regulatory deletion request must reach.", answer: "A tombstone marks a row logically deleted so reads skip it, but the bytes persist until compaction rewrites the affected files, and they may still exist in snapshots and backups. A regulatory erasure request must therefore reach every derived copy: caches, search indexes, analytical warehouses, embeddings, backups, and logs. Track it as a durable request record with per-sink completion, and where a backup cannot be rewritten, crypto-shred by destroying a per-subject key." },
+    ],
     furtherReading: [{ label: "The Log-Structured Merge-Tree paper", url: "https://www.cs.umb.edu/~poneil/lsmtree.pdf" }, { label: "Bigtable paper", url: "https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf" }],
   },
   {
     id: "timed-designs",
-    week: 1,
-    day: 7,
+    week: 2,
+    day: 4,
     tier: 0,
     title: "Timed design execution",
     eyebrow: "Turn knowledge into a 45-minute argument",
@@ -310,6 +335,79 @@ export const foundationTopics: StudyTopic[] = [
     quiz: [
       { prompt: "By roughly what point should a 45-minute answer have an end-to-end architecture?", options: ["Minute 5", "Minute 20", "Minute 40", "Only after every estimate is exact"], answerIndex: 1, explanation: "Reaching a coherent high-level flow near minute 20 preserves time for a meaningful deep dive and reliability." },
       { prompt: "What makes a trade-off explanation senior-level?", options: ["Naming the newest product", "Listing both options only", "Connecting a requirement to a choice and its cost", "Avoiding a decision"], answerIndex: 2, explanation: "A trade-off is useful when the interviewer can see which requirement drove the choice and what the system gives up." },
+    ],
+    recallCards: [
+      { id: "timed-clock", prompt: "Give the phase budget for a 45-minute design and the checkpoint that tells you that you are behind.", answer: "Roughly: clarify 3-5 minutes, estimate 3-5, APIs and data model 3-5, end-to-end architecture 5-7, deep dive 15-20, and reliability close about 5. The checkpoint is having a coherent end-to-end flow by roughly minute 20; if the high-level architecture is not standing by then, the deep dive and the reliability close will both be sacrificed, which are exactly the parts that produce senior signal." },
+      { id: "timed-tradeoff", prompt: "State what makes a trade-off answer read as senior rather than encyclopedic.", answer: "Name two viable options, identify the specific requirement that discriminates between them, commit to a choice, and state what the choice costs and under what measurement you would revisit it. Listing both options without deciding reads as indecision; naming a product as the rationale reads as pattern matching. The interviewer is looking for the causal link from a stated requirement to a decision and its consequence." },
+    ],
+  },
+  {
+    id: "auth-identity-access",
+    week: 2,
+    day: 3,
+    tier: 0,
+    title: "Identity, sessions & access control",
+    eyebrow: "Prove who, then decide what",
+    estimatedMinutes: 80,
+    summary: "Separate authentication from authorization, choose between stateful sessions and self-contained tokens, and design revocation, delegation, and service-to-service identity deliberately.",
+    whyItMatters: "Almost every design interview reaches “how do you authenticate this?” A weak answer names JWT and stops. A senior answer explains where trust originates, how it is scoped, and how it is revoked before its natural expiry.",
+    objectives: ["Distinguish authentication, authorization, and delegation", "Choose session or token architecture from revocation and scale requirements", "Model permissions for multi-tenant and hierarchical resources", "Design service-to-service identity without shared long-lived secrets"],
+    concepts: ["OAuth 2.0", "OpenID Connect", "JWT", "opaque session", "refresh token", "RBAC", "ReBAC", "mTLS", "token revocation"],
+    deepDive: [
+      {
+        title: "Authentication, authorization, and delegation are different problems",
+        summary: "Conflating them produces designs that cannot answer who granted what to whom.",
+        points: [
+          "Authentication establishes an identity; authorization decides whether that identity may perform an action on a resource. OAuth 2.0 is a delegation framework, not an authentication protocol—OpenID Connect is the identity layer built on top of it.",
+          "An access token says what the bearer may do; an ID token says who signed in. Using an access token as proof of identity, or accepting a token whose audience names a different service, is a routine and serious mistake.",
+          "Validate issuer, audience, expiry, signature, and algorithm against an allowlist. Never trust the token's own `alg` header to select verification, and fetch signing keys from a cached, rotated JWKS endpoint.",
+        ],
+      },
+      {
+        title: "Stateful sessions versus self-contained tokens",
+        summary: "The choice is fundamentally about revocation latency versus lookup cost.",
+        points: [
+          "An opaque session ID carries no claims; every request resolves it against a session store. Revocation is immediate because the record is deleted, at the cost of a lookup on the hot path.",
+          "A signed JWT is verifiable without I/O, so it scales horizontally—but it stays valid until it expires. You cannot un-issue it. Short access-token lifetimes plus a longer refresh token bound to a revocable server-side record recover most of the control.",
+          "If you add a denylist check to make JWTs revocable, you have reintroduced the lookup and kept the complexity. Choose deliberately, and state the maximum window during which a compromised credential remains usable.",
+        ],
+      },
+      {
+        title: "Model permissions and machine identity",
+        summary: "Authorization data has its own consistency and latency requirements.",
+        points: [
+          "RBAC assigns permissions through roles and is simple to reason about; relationship-based models answer questions like “can this user view this document because they belong to a folder's group,” which flat roles cannot express without combinatorial explosion.",
+          "Centralized policy evaluation gives one auditable decision point but adds a hot dependency; distributed evaluation with replicated policy is fast but makes revocation eventually consistent. Name the staleness window—a removed employee should not keep read access for minutes.",
+          "For service-to-service calls, prefer short-lived workload credentials (mTLS certificates or federated tokens) over shared static API keys. Propagate the end-user identity separately from the calling service identity so authorization can consider both.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Opaque session vs self-contained token", preferA: "Use server-side sessions when instant revocation and fine-grained control matter.", preferB: "Use signed tokens for stateless horizontal scale and cross-service verification.", watch: "A revocation denylist on a JWT recreates the session lookup you tried to avoid." },
+      { decision: "Centralized vs distributed authorization", preferA: "Centralize for auditability and consistent policy.", preferB: "Distribute replicated policy for latency and blast-radius isolation.", watch: "Replicated policy makes permission removal eventually consistent." },
+      { decision: "Long vs short token lifetime", preferA: "Short access tokens bound the damage of a leaked credential.", preferB: "Longer lifetimes reduce refresh traffic and identity-provider load.", watch: "Refresh storms after a mass expiry can overload the auth service." },
+    ],
+    failureModes: [
+      { mode: "Token accepted without audience validation", symptom: "A token minted for one service is replayed against another", mitigation: "Validate issuer and audience per service and reject unexpected values." },
+      { mode: "Revoked user retains access until expiry", symptom: "Offboarded account still reads data for the token lifetime", mitigation: "Shorten access-token life, bind sessions to a revocable record, and propagate revocation events." },
+      { mode: "Permission check runs after data is fetched", symptom: "Authorization filters results the caller already loaded, leaking through timing or error differences", mitigation: "Push the authorization predicate into the query and fail closed on policy-store errors." },
+    ],
+    interviewQuestions: ["Where does trust originate for this request?", "How long can a compromised credential remain usable?", "Who may act on behalf of whom, and how is that recorded?", "What happens if the policy store is unavailable?"],
+    decisionChecklist: ["Separate authentication from authorization explicitly", "State the revocation window", "Validate issuer, audience, expiry, and algorithm", "Choose a permission model that fits resource shape", "Give services their own short-lived identity"],
+    exercise: "Design authentication and authorization for a multi-tenant document product where users share folders across organizations, and state exactly how access is removed within one minute of offboarding.",
+    prerequisites: ["Networking & service boundaries", "Caching fundamentals"],
+    relatedDesigns: ["File storage and synchronization", "Enterprise RAG assistant", "Payment ledger"],
+    quiz: [
+      { prompt: "Why is OAuth 2.0 alone insufficient to authenticate a user?", options: ["It is deprecated", "It is a delegation framework; OpenID Connect adds the identity layer", "It only works for mobile clients", "It cannot issue tokens"], answerIndex: 1, explanation: "OAuth 2.0 authorizes access to resources. OIDC layers on an ID token with verified identity claims, which is what authentication requires." },
+      { prompt: "What is the main operational cost of self-contained JWTs?", options: ["They cannot be signed", "They require a database read per request", "They stay valid until expiry and cannot be un-issued", "They only work over HTTP/1.1"], answerIndex: 2, explanation: "Stateless verification is the benefit and the cost: without a lookup there is nothing to delete, so revocation is bounded by token lifetime." },
+    ],
+    recallCards: [
+      { id: "auth-revocation", prompt: "Explain the revocation trade-off between opaque sessions and JWTs, and how short access tokens plus refresh tokens resolve it.", answer: "An opaque session resolves against a store on every request, so deleting the record revokes access immediately at the cost of a hot-path lookup. A signed JWT verifies with no I/O and scales horizontally, but nothing can un-issue it before expiry. Issuing short-lived access tokens against a longer refresh token bound to a revocable server-side record keeps stateless verification on the hot path while bounding compromise to the access-token lifetime." },
+      { id: "auth-validation", prompt: "List what must be validated on an incoming JWT, and name the validation mistake that enables cross-service replay.", answer: "Validate issuer, audience, expiry/not-before, signature, and the algorithm against a server-side allowlist, using keys from a cached rotating JWKS. Never let the token's own alg header choose the verification method. Skipping audience validation is what enables replay: a token legitimately minted for service A is presented to service B, which accepts it because it only checked the signature." },
+    ],
+    furtherReading: [
+      { label: "RFC 6749 — OAuth 2.0", url: "https://www.rfc-editor.org/rfc/rfc6749" },
+      { label: "RFC 9068 — JWT access tokens", url: "https://www.rfc-editor.org/rfc/rfc9068" },
     ],
   },
 ];

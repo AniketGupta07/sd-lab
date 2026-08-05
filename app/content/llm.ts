@@ -3,7 +3,7 @@ import type { DesignPrompt, StudyTopic } from "./types";
 export const llmTopics: StudyTopic[] = [
   {
     id: "llm-inference-execution",
-    week: 7,
+    week: 11,
     day: 1,
     tier: 3,
     title: "LLM inference execution: prefill, decode, and KV state",
@@ -80,11 +80,15 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Which metric isolates the user's wait after the first streamed token?", options: ["TTFT", "Inter-token latency", "Prompt tokens per request", "Cache allocation rate"], answerIndex: 1, explanation: "Inter-token latency measures the cadence of emitted tokens after generation begins; TTFT ends at the first token." },
       { prompt: "With all other dimensions fixed, what happens to KV-cache bytes when cached sequence length doubles?", options: ["They stay constant", "They grow by roughly 1.4×", "They double", "They quadruple"], answerIndex: 2, explanation: "KV state is stored per layer and cached token, so memory scales linearly with sequence length." },
     ],
+    recallCards: [
+      { id: "llmx-two-phases", prompt: "Contrast prefill and decode by what limits each, and connect them to the two latency SLOs.", answer: "Prefill processes all prompt tokens in parallel, so it is a large matrix operation that is typically compute-bound and scales with prompt length; it dominates time to first token. Decode generates one token per step, reading the full model weights and the accumulated KV cache to produce a single token of work, so it is typically memory-bandwidth-bound; it determines inter-token latency after streaming begins. Because they are limited by different resources, they need different batching and scheduling treatment, and a fleet can meet one SLO while badly missing the other." },
+      { id: "llmx-kv-size", prompt: "Give the KV-cache size formula and explain what each term implies for capacity.", answer: "Per sequence, roughly 2 x layers x KV heads x head dimension x cached tokens x bytes per element, where the 2 covers keys and values. It grows linearly in both context length and number of concurrent sequences, which makes it, not model weights, the binding constraint on concurrency: weights are a fixed cost paid once, while KV scales with live traffic. Grouped-query and multi-query attention cut KV heads relative to query heads and so cut this term directly, which is why they are standard in long-context serving." },
+    ],
     furtherReading: [{ label: "vLLM: Efficient Memory Management for LLM Serving", url: "https://arxiv.org/abs/2309.06180" }],
   },
   {
     id: "llm-serving-capacity-admission",
-    week: 7,
+    week: 11,
     day: 2,
     tier: 3,
     title: "Continuous batching, paged attention, and admission",
@@ -161,11 +165,15 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Why can continuous batching outperform a static request batch?", options: ["It removes autoregression", "It replaces finished sequences between iterations instead of waiting for the longest request", "It stores no KV cache", "It guarantees identical output lengths"], answerIndex: 1, explanation: "Iteration-level replacement avoids idle slots caused by variable completion lengths." },
       { prompt: "Which is the safest primary admission input for mixed-length inference?", options: ["Requests per second only", "GPU temperature only", "Prompt work plus reserved output/KV work and deadlines", "Number of API keys"], answerIndex: 2, explanation: "Length-aware future work captures the compute and memory spread hidden by request counts." },
     ],
+    recallCards: [
+      { id: "llms-continuous", prompt: "Explain continuous batching and why it beats static batching for generation.", answer: "Static batching holds a batch until its longest sequence finishes, so short requests wait on long ones and the accelerator idles on finished slots. Continuous batching schedules at token-iteration granularity: after each decode step, completed sequences are evicted and queued arrivals join immediately, so occupancy stays high despite highly variable output lengths. The scheduler must still budget tokens across prefill and decode within an iteration, because admitting a large prefill delays every active decoder and shows up directly as an inter-token latency spike." },
+      { id: "llms-goodput", prompt: "Define goodput for an inference fleet and explain why raw throughput misleads.", answer: "Goodput is tokens completed while meeting the TTFT and inter-token latency SLOs. Raw tokens per second can be raised almost arbitrarily by batching more aggressively and letting queueing grow, so a fleet can report rising throughput while an increasing share of requests violates their latency targets and are effectively worthless. Capacity planning and autoscaling must therefore be driven by goodput, queued token work, and SLO-miss risk rather than by utilization or aggregate token rate." },
+    ],
     furtherReading: [{ label: "vLLM PagedAttention paper", url: "https://arxiv.org/abs/2309.06180" }],
   },
   {
     id: "llm-inference-optimization-routing",
-    week: 7,
+    week: 11,
     day: 3,
     tier: 3,
     title: "Inference parallelism, compression, caching, and routing",
@@ -242,6 +250,10 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "When is adding data-parallel serving replicas generally preferable to increasing tensor-parallel degree?", options: ["When one replica fits and independent-request throughput is the goal", "When no replica fits in memory", "When every token needs an extra collective", "When network bandwidth is zero"], answerIndex: 0, explanation: "Independent replicas avoid within-layer collectives and scale aggregate request throughput when each model copy fits." },
       { prompt: "Which value is insufficient by itself as a prefix-cache key?", options: ["Exact token IDs and model revision", "Tokenizer and adapter revision", "A semantic-similarity score", "Tenant cache-sharing scope"], answerIndex: 2, explanation: "KV reuse requires an exact compatible computation prefix; semantic similarity does not produce identical hidden state." },
     ],
+    recallCards: [
+      { id: "llmo-paged", prompt: "Explain paged attention and the specific waste it eliminates.", answer: "Reserving a contiguous KV region sized for each request's maximum possible context wastes everything between actual and maximum length, and contiguity requirements cause external fragmentation that can block admission while total free memory looks adequate. Paged attention allocates KV in fixed-size blocks mapped through an indirection table, so a sequence grows block by block and physical blocks need not be adjacent. Reference-counted blocks additionally allow copy-on-write sharing of identical prompt prefixes across requests, which is a large saving for shared system prompts and few-shot examples." },
+      { id: "llmo-speculative", prompt: "Describe speculative decoding and state precisely why quality is preserved.", answer: "A small draft model proposes several tokens ahead, and the target model verifies them in a single batched forward pass, accepting the longest prefix consistent with what it would itself have sampled and falling back to its own token at the first divergence. Because acceptance is defined by the target model's own distribution, the output distribution is unchanged - the speedup comes from replacing several sequential memory-bandwidth-bound decode steps with one verification pass. The gain depends on draft acceptance rate, and a poorly matched draft model can make throughput worse." },
+    ],
     furtherReading: [
       { label: "Megatron-LM model parallelism", url: "https://arxiv.org/abs/1909.08053" },
       { label: "Speculative decoding", url: "https://arxiv.org/abs/2211.17192" },
@@ -249,7 +261,7 @@ export const llmTopics: StudyTopic[] = [
   },
   {
     id: "llm-distributed-training",
-    week: 7,
+    week: 11,
     day: 4,
     tier: 3,
     title: "Distributed training topology, memory, and recovery",
@@ -326,6 +338,10 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Which collective pattern is characteristic of FSDP/ZeRO-3-style parameter sharding during execution?", options: ["Broadcast logs only", "All-gather parameter shards and reduce-scatter gradients", "No communication", "DNS round trips"], answerIndex: 1, explanation: "Ranks gather the parameter material needed for computation and return gradients to their owning shards with reduce-scatter-style communication." },
       { prompt: "What makes a distributed checkpoint safe to advertise as recoverable?", options: ["Rank zero wrote a file", "At least half the ranks finished", "A manifest atomically names every validated shard and the complete training state", "The loss was decreasing"], answerIndex: 2, explanation: "The committed manifest is the visibility boundary that prevents a restart from mixing missing or inconsistent rank state." },
     ],
+    recallCards: [
+      { id: "llmt-parallelism", prompt: "Map tensor, pipeline, and data parallelism to their communication patterns and placement.", answer: "Tensor parallelism shards individual operators, requiring latency-sensitive collectives inside every layer, so it belongs within a single high-bandwidth node. Pipeline parallelism assigns contiguous layer ranges to stages and passes activations and gradients between them, so it tolerates slower links but introduces bubbles controlled by the microbatch schedule. Data parallelism replicates the model across groups and all-reduces gradients once per step, so it is the most tolerant of slow interconnect and is placed outermost. The product of the dimensions equals world size and constrains how checkpoints can be resharded." },
+      { id: "llmt-zero", prompt: "State what each ZeRO stage partitions and what that costs.", answer: "Stage 1 partitions optimizer state, stage 2 adds gradients, and stage 3 adds parameters themselves. Memory per device falls roughly in proportion at each stage, but communication rises: stage 3 must all-gather parameter shards before a unit's forward and backward compute and reduce-scatter gradients afterwards, so bandwidth and latency become the limit. Optimizer state is usually the largest term because Adam keeps two moments plus a high-precision master copy, which is why partitioning it first gives the best ratio of savings to added communication." },
+    ],
     furtherReading: [
       { label: "ZeRO: Memory Optimizations Toward Training Trillion Parameter Models", url: "https://arxiv.org/abs/1910.02054" },
       { label: "Megatron-LM at scale", url: "https://arxiv.org/abs/2104.04473" },
@@ -333,7 +349,7 @@ export const llmTopics: StudyTopic[] = [
   },
   {
     id: "llm-enterprise-rag-systems",
-    week: 7,
+    week: 11,
     day: 5,
     tier: 3,
     title: "Enterprise RAG: freshness, ACLs, retrieval, and evidence",
@@ -410,12 +426,16 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Why is retrieving global top-k and then applying ACL filters unsafe as the primary design?", options: ["Vector search cannot use metadata", "It can leak candidate information and leave too few authorized results", "It always increases recall", "It removes the need for reranking"], answerIndex: 1, explanation: "Authorization belongs in candidate generation; a post-filter is useful only as a final recheck." },
       { prompt: "Which identifier must a citation retain for reproducibility?", options: ["Only the document title", "The immutable document version and source offsets used in context", "Only the current URL", "The GPU worker ID"], answerIndex: 1, explanation: "Titles and live URLs can change; version plus offsets identifies the evidence actually presented to the model." },
     ],
+    recallCards: [
+      { id: "llmr-acl", prompt: "Explain why retrieval-time authorization is mandatory and why post-filtering is unsafe.", answer: "An index built across a company's documents contains content most users may not see, so permissions must be enforced as a filter within the retrieval query itself, evaluated against current permissions rather than those captured at indexing time. Retrieving first and filtering afterwards leaks through result counts, latency differences, and any path where retrieved text reaches the model before the filter runs - and once unauthorized content is in the context window it can surface in the answer. The system must fail closed: if the permission service is unavailable, retrieval returns nothing rather than everything." },
+      { id: "llmr-eval", prompt: "Explain why retrieval quality and answer quality must be measured separately.", answer: "A wrong answer has two distinct causes: the retriever never surfaced the needed evidence, or the generator had the evidence and misused it. A single end-to-end score cannot distinguish them, so it cannot direct the fix. Measure retrieval with recall and precision at k against known relevant documents, and measure generation given correct context with faithfulness to the evidence and correct abstention when evidence is absent. This separation is what tells you whether to tune chunking and the retriever or to change the prompt and model." },
+    ],
     furtherReading: [{ label: "Retrieval-Augmented Generation", url: "https://arxiv.org/abs/2005.11401" }],
   },
   {
     id: "llm-post-training",
-    week: 7,
-    day: 6,
+    week: 12,
+    day: 1,
     tier: 3,
     title: "Post-training: SFT, preferences, rollouts, and lineage",
     eyebrow: "Week 7 · Day 6",
@@ -491,6 +511,10 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "What does DPO avoid relative to a conventional reward-model plus online RLHF pipeline?", options: ["Any preference data", "A separately trained reward-model serving and on-policy RL rollout loop", "A reference policy", "Evaluation gates"], answerIndex: 1, explanation: "DPO learns directly from chosen/rejected pairs under its objective, removing the separate reward-and-online-RL operational loop." },
       { prompt: "Which rollout record is reproducible?", options: ["Prompt text only", "Policy name and final reward only", "Prompt plus pinned policy, tokenizer, sampling, tool environment, reward versions, and outputs", "GPU hostname only"], answerIndex: 2, explanation: "Reproduction requires every semantic input and scoring version, not just the prompt or a mutable model name." },
     ],
+    recallCards: [
+      { id: "llmp-sft-pref", prompt: "Distinguish supervised fine-tuning from preference optimization by the signal each consumes.", answer: "SFT trains on demonstrations - prompt and target completion pairs - teaching format, task behavior, and domain style by imitation; it is bounded by the quality of the demonstrations and cannot express that one acceptable answer is better than another. Preference optimization consumes comparisons between candidate outputs, which is a far cheaper signal to collect and can express relative quality, letting the model exceed the average demonstration. RLHF learns an explicit reward model and optimizes against it with a KL penalty toward the reference policy; DPO optimizes the preference objective directly without a separate reward model or sampling loop." },
+      { id: "llmp-reward-hack", prompt: "Explain reward hacking and the standard mitigation.", answer: "A learned reward model is a proxy trained on finite comparisons, so optimizing hard against it finds inputs that score highly without being genuinely better - excessive length, confident tone, formatting the annotators liked - and true quality falls while measured reward rises. The standard mitigation is a KL penalty anchoring the policy near the reference model, so it cannot drift into the regions where the proxy is least reliable, combined with monitoring the reward-versus-held-out-quality gap and periodically refreshing preference data on the current policy's own outputs." },
+    ],
     furtherReading: [
       { label: "Training language models to follow instructions with human feedback", url: "https://arxiv.org/abs/2203.02155" },
       { label: "Direct Preference Optimization", url: "https://arxiv.org/abs/2305.18290" },
@@ -498,8 +522,8 @@ export const llmTopics: StudyTopic[] = [
   },
   {
     id: "llm-evaluation-safety-operations",
-    week: 7,
-    day: 7,
+    week: 12,
+    day: 2,
     tier: 3,
     title: "LLM evaluation, safety boundaries, and cost operations",
     eyebrow: "Week 7 · Day 7",
@@ -575,6 +599,10 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "What is the correct security interpretation of instructions found inside a retrieved document?", options: ["They override the system prompt", "They are untrusted data and cannot grant tool authority", "They are safe if the document is long", "They bypass tenant authorization"], answerIndex: 1, explanation: "Only the orchestrator's trusted policy may grant capabilities; retrieved content remains untrusted input." },
       { prompt: "A judge ranking reverses when answer A and B swap positions. What does that demonstrate?", options: ["Perfect calibration", "A position-bias failure that must be measured and mitigated", "The candidates are identical", "Human review is unnecessary"], answerIndex: 1, explanation: "An irrelevant order change should not reverse a stable preference; swap tests expose position bias." },
     ],
+    recallCards: [
+      { id: "llme-judge", prompt: "Describe the biases of an LLM judge and how a judge is validated.", answer: "LLM judges show position bias favoring one ordering, verbosity bias favoring longer answers, self-preference for their own model family, and sensitivity to formatting rather than substance. They are validated like any classifier: score a human-labeled set, report agreement against human judgment, and calibrate on that. Practical controls are randomizing candidate order or averaging both orders, forcing a rubric with explicit criteria, and reserving the judge for cases where measured agreement is acceptable - never trusting fluent scores because they are cheap." },
+      { id: "llme-injection", prompt: "Explain prompt injection and state the boundary that actually contains it.", answer: "Retrieved documents, tool outputs, and user content all arrive as text in the same context as instructions, so an attacker can embed directives that the model may follow - exfiltrating context or misusing a tool. Prompt-level defenses are mitigations, not guarantees, because there is no reliable separation between data and instructions inside the context. The containing boundary is authorization outside the model: tools enforce their own permissions against the end user's identity, side-effectful actions require confirmation, egress is restricted to allowlisted destinations, and model output is treated as untrusted input by everything downstream." },
+    ],
     furtherReading: [
       { label: "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena", url: "https://arxiv.org/abs/2306.05685" },
       { label: "HELM: Holistic Evaluation of Language Models", url: "https://arxiv.org/abs/2211.09110" },
@@ -582,9 +610,9 @@ export const llmTopics: StudyTopic[] = [
   },
   {
     id: "mock-timed-orchestration",
-    week: 8,
-    day: 1,
-    tier: 3,
+    week: 7,
+    day: 4,
+    tier: 1,
     title: "Orchestrate a 45-minute senior design interview",
     eyebrow: "Week 8 · Day 1",
     estimatedMinutes: 70,
@@ -659,12 +687,16 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Which estimate belongs in a senior interview answer?", options: ["Every number you can calculate", "Only an estimate tied to a capacity, partitioning, cost, or SLO decision", "No estimate unless exact", "Daily active users without units"], answerIndex: 1, explanation: "An estimate earns time when it changes the design or defines a critical uncertainty." },
       { prompt: "What is the best response when a new constraint invalidates an earlier assumption?", options: ["Ignore it", "Restart silently", "Update the assumption ledger and explain the downstream design change", "Argue that the prompt is wrong"], answerIndex: 2, explanation: "Visible correction demonstrates coherent reasoning and collaboration." },
     ],
+    recallCards: [
+      { id: "mock-ledger", prompt: "Describe the decision ledger and why it improves the close.", answer: "Keep a visible running list of each decision made, the requirement that drove it, and what it costs. It prevents silently contradicting an earlier choice, gives the interviewer an explicit trace of reasoning rather than asking them to infer it, and makes the two-minute close mechanical - the summary is already written. It also makes recovery easy when an interviewer challenges a choice, because the driving requirement is stated and can be re-examined rather than defended reflexively." },
+      { id: "mock-stall", prompt: "State how to recover when you stall mid-interview.", answer: "Return to the invariants and the request path: restate the source of truth, walk one write and one read end to end, and the missing component usually becomes evident. If the stall is about a specific mechanism, say what you would measure to decide, name the two candidate approaches, and commit to one with a stated trigger for revisiting - an interviewer accepts a reasoned provisional choice far more readily than silence. Do not fill time narrating uncertainty; move to the next phase and return if time allows." },
+    ],
   },
   {
     id: "mock-classic-synthesis",
-    week: 8,
-    day: 2,
-    tier: 3,
+    week: 7,
+    day: 5,
+    tier: 1,
     title: "Classic systems mock synthesis",
     eyebrow: "Week 8 · Day 2",
     estimatedMinutes: 80,
@@ -739,12 +771,16 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Where should idempotency be enforced for an at-least-once payment event?", options: ["Only in the client", "At the correctness-critical effect boundary using a stable business identity", "Only in the broker UI", "After analytics processing"], answerIndex: 1, explanation: "Delivery can repeat; the financial mutation must atomically deduplicate the logical effect." },
       { prompt: "What proves a queue can recover after a traffic spike?", options: ["Ingress eventually becomes zero", "Consumer recovery throughput exceeds arrival rate with bounded retention and retries", "The queue is durable", "There are many topic names"], answerIndex: 1, explanation: "A durable backlog is useful only if consumers have enough headroom to drain it before retention or business deadlines expire." },
     ],
+    recallCards: [
+      { id: "mockc-open", prompt: "Give the opening sequence for a classic systems design and the trap to avoid.", answer: "Establish users and core operations, the scale envelope, the correctness invariants, and what is explicitly out of scope; then state the source of truth before drawing anything. The trap is starting from a component list - load balancer, cache, queue, database - which produces a plausible-looking diagram in which ownership of state and the direction of data flow are never actually specified, so no trade-off afterwards can be evaluated." },
+      { id: "mockc-failure", prompt: "Name the failure injections that reliably produce senior signal in a classic design.", answer: "Timeout after a commit, so the retry path and idempotency must be explained; duplicate or out-of-order message delivery; a hot key or celebrity tenant exceeding one partition; a slow rather than failed dependency, which tests backpressure and deadlines instead of simple error handling; and loss of one availability zone during a write. Each forces a mechanism that is invisible on the happy path, which is exactly what distinguishes a senior answer." },
+    ],
   },
   {
     id: "mock-ml-synthesis",
-    week: 8,
-    day: 3,
-    tier: 3,
+    week: 10,
+    day: 4,
+    tier: 2,
     title: "ML system mock synthesis",
     eyebrow: "Week 8 · Day 3",
     estimatedMinutes: 85,
@@ -819,11 +855,15 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "A feature's event timestamp predates the decision, but the value reached the feature store the next day. May training use it for that decision?", options: ["Yes, because event time is earlier", "No, because it was not available at decision time", "Yes, if AUC improves", "Only for test rows"], answerIndex: 1, explanation: "Point-in-time correctness uses availability as well as event time; otherwise training sees future information." },
       { prompt: "What can a shadow deployment establish?", options: ["Causal user-outcome lift", "Live execution, feature, latency, prediction, and capacity behavior without changing the user action", "Long-term retention improvement", "Absence of feedback loops"], answerIndex: 1, explanation: "A shadow validates execution but does not assign treatment, so causal product effects require a controlled live test." },
     ],
+    recallCards: [
+      { id: "mockm-frame", prompt: "State the opening moves for an ML system design question.", answer: "Name the single decision the system makes and the action it triggers, then the prediction target as something observable in logs, the unit and latency budget of prediction, the baseline to beat, and the guardrails that would trigger rollback. Only then discuss data, features, and model class. Candidates who open with model architecture almost always fail to connect the model to a product decision, which is the primary thing being assessed." },
+      { id: "mockm-lifecycle", prompt: "List the lifecycle elements an ML design must close with.", answer: "Point-in-time-correct training data and the label maturity rule; the feature path shared between training and serving to prevent skew; offline evaluation with slices and an operating point; a staged rollout through shadow, canary, and experiment with predeclared guardrails; monitoring covering inputs, predictions, and delayed outcomes; a retraining trigger and cadence; and a rollback that restores model and feature versions together. Omitting the feedback loop and its contamination is the most common gap." },
+    ],
   },
   {
     id: "mock-llm-infrastructure-synthesis",
-    week: 8,
-    day: 4,
+    week: 12,
+    day: 3,
     tier: 3,
     title: "LLM infrastructure mock synthesis",
     eyebrow: "Week 8 · Day 4",
@@ -899,11 +939,15 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Which traffic description is sufficient for an LLM capacity discussion?", options: ["1,000 RPS", "Prompt/output length distributions, model mix, concurrency, SLOs, and failure headroom", "Daily users only", "GPU count only"], answerIndex: 1, explanation: "Token work, live KV state, model identity, deadlines, and resilience determine serving capacity." },
       { prompt: "When is a fallback unsafe?", options: ["When it is cheaper", "When it cannot preserve required data policy, tool, schema, safety, or quality semantics", "When it has lower queue time", "When it is already warm"], answerIndex: 1, explanation: "Fallback is a product contract, not merely another reachable endpoint." },
     ],
+    recallCards: [
+      { id: "mockl-envelope", prompt: "Describe the workload envelope to establish before designing an LLM system.", answer: "Request rate, prompt and output length distributions rather than means, model sizes and how many are served, TTFT and inter-token latency targets, tolerance for approximation, tenancy and isolation requirements, and cost ceiling. These determine KV memory, batching strategy, parallelism layout, and routing before any component is named. Answers that skip the envelope end up sizing on peak FLOPS, which predicts neither achievable concurrency nor latency." },
+      { id: "mockl-close", prompt: "Name what an LLM infrastructure answer must close with.", answer: "Admission and overload behavior expressed in tokens and KV blocks rather than requests; the safety boundary, with model output treated as untrusted and tool authorization enforced outside the model; evaluation covering both retrieval and generation with a calibrated judge; and unit economics - cost per thousand tokens or per request - with the lever that would reduce it. Closing on cost and safety together is what separates an infrastructure answer from a demo." },
+    ],
   },
   {
     id: "mock-critique-remediation",
-    week: 8,
-    day: 5,
+    week: 12,
+    day: 4,
     tier: 3,
     title: "Critique mocks and remediate the highest-leverage misses",
     eyebrow: "Week 8 · Day 5",
@@ -979,11 +1023,15 @@ export const llmTopics: StudyTopic[] = [
       { prompt: "Which mistake-log entry is most actionable?", options: ["Be better at databases", "At 18:20 I chose eventual inventory writes before stating the no-oversell invariant; next drill is a six-operation consistency table in eight minutes", "Study more", "The prompt was hard"], answerIndex: 1, explanation: "It contains evidence, consequence, a corrected framing, and a bounded rehearsal." },
       { prompt: "When should a mistake be marked resolved?", options: ["After rereading the notes", "After one memorized replay", "After successful retrieval twice, including transfer to a different design", "At the end of the week automatically"], answerIndex: 2, explanation: "Transfer and spaced retrieval provide stronger evidence than familiarity with one answer." },
     ],
+    recallCards: [
+      { id: "mockr-triage", prompt: "Explain how to triage mistakes after a mock rather than listing them all.", answer: "Group them by cause rather than by occurrence: a missed requirement, a missing mechanism such as idempotency or backpressure, a communication failure where the reasoning existed but was not made visible, and time mismanagement. Fix the category that would change the most outcomes first - typically one structural habit rather than a knowledge gap - and record it as a single rule to apply in the next attempt. A long undifferentiated list produces no behavior change." },
+      { id: "mockr-recall", prompt: "State why written self-critique beats replaying the recording.", answer: "Writing the correct approach from memory is retrieval practice and produces the durable representation you will need under pressure; rewatching is recognition, which feels productive and transfers poorly. The useful artifact is a short entry naming the mistake, the correct approach, and the trigger that should have prompted it, scheduled for review before the next mock so the correction is rehearsed rather than merely recorded." },
+    ],
   },
   {
     id: "mock-evolution-executive-close",
-    week: 8,
-    day: 6,
+    week: 12,
+    day: 5,
     tier: 3,
     title: "Handle 10× evolution and deliver the executive close",
     eyebrow: "Week 8 · Day 6",
@@ -1058,6 +1106,10 @@ export const llmTopics: StudyTopic[] = [
     quiz: [
       { prompt: "What is the best first response to a 10× scale follow-up?", options: ["Multiply every component by ten", "Recompute the changed workload and identify the first threshold or bottleneck", "Replace every database", "Remove failure headroom"], answerIndex: 1, explanation: "Different dimensions stress different boundaries; the architecture should evolve from the first measured limit." },
       { prompt: "Which final-close structure is strongest?", options: ["List every technology", "Requirement/scale, critical path, central trade-off, top risks, next validation", "Introduce a new design", "Repeat all estimates"], answerIndex: 1, explanation: "This structure communicates the decision, reasoning, risk posture, and learning plan concisely." },
+    ],
+    recallCards: [
+      { id: "mocke-10x", prompt: "Describe how to answer the 10x scale question well.", answer: "Identify which specific resource saturates first - a partition's write rate, cache working set, a cross-region link, GPU memory - and say what measurement would reveal it approaching the limit. Then give the next architectural move and what it costs, and note what does not need to change. A generic answer of add shards and caches carries no signal; naming the binding constraint and its trigger metric is what demonstrates you have modeled the system rather than memorized a topology." },
+      { id: "mocke-exec", prompt: "State how to close a design for a non-specialist audience.", answer: "In under two minutes: what the system does and its source of truth, the single most consequential trade-off and why it was chosen, the biggest remaining risk with its mitigation, and the cost driver. Avoid component inventory and internal jargon - the test is whether someone who did not watch the design can restate the decision and its consequence." },
     ],
   },
 ];

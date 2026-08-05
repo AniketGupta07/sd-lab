@@ -44,3 +44,6 @@ next-env.d.ts
 
 ai_system_design_study_website_brief.md
 /out/
+
+# Claude Code local state and worktrees
+/.claude/worktrees/

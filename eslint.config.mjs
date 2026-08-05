@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Git worktrees carry their own checkout and build output; linting them
+    // reports thousands of findings against generated code in another branch.
+    ".claude/**",
   ]),
 ]);
 

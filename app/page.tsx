@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   allTopics,
   curriculumWeeks,
@@ -18,6 +18,7 @@ type View =
   | "dashboard"
   | "curriculum"
   | "topic"
+  | "recall"
   | "drills"
   | "practice"
   | "mock"
@@ -53,6 +54,13 @@ type ScoreField =
   | "communication"
   | "timeManagement";
 
+/**
+ * One pen stroke, stored as a flat [x0,y0,x1,y1,…] list of coordinates
+ * normalized to 0–1. Normalizing keeps a sketch valid at any canvas size, and
+ * the flat form keeps the JSON small enough to sit in localStorage.
+ */
+type Stroke = number[];
+
 type PracticeDraft = {
   id: string;
   promptId: string;
@@ -61,7 +69,118 @@ type PracticeDraft = {
   secondsRemaining: number;
   fields: Record<PracticeField, string>;
   scores: Record<ScoreField, number>;
+  sketch: Stroke[];
 };
+
+const SKETCH_WIDTH = 1600;
+const SKETCH_HEIGHT = 900;
+
+function normalizeSketch(value: unknown): Stroke[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((stroke): stroke is number[] =>
+      Array.isArray(stroke)
+        && stroke.length >= 4
+        && stroke.length % 2 === 0
+        && stroke.every((n) => typeof n === "number" && Number.isFinite(n)))
+    .slice(0, 4000)
+    .map((stroke) => stroke.map((n) => Math.min(1, Math.max(0, n))));
+}
+
+/**
+ * Freehand canvas for drawing the architecture before revealing the reference.
+ * A system design interview is a drawing exercise; typing prose into a textarea
+ * does not rehearse it.
+ */
+function SketchPad({
+  strokes,
+  onChange,
+  theme,
+}: {
+  strokes: Stroke[];
+  onChange: (next: Stroke[]) => void;
+  theme: "light" | "dark";
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawingRef = useRef<Stroke | null>(null);
+  const ink = theme === "dark" ? "#dce6f5" : "#10233f";
+
+  const paint = useCallback((all: Stroke[], live: Stroke | null) => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+    context.clearRect(0, 0, SKETCH_WIDTH, SKETCH_HEIGHT);
+    context.strokeStyle = ink;
+    context.lineWidth = 3;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    for (const stroke of live ? [...all, live] : all) {
+      context.beginPath();
+      for (let i = 0; i < stroke.length; i += 2) {
+        const x = stroke[i] * SKETCH_WIDTH;
+        const y = stroke[i + 1] * SKETCH_HEIGHT;
+        if (i === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.stroke();
+    }
+  }, [ink]);
+
+  useEffect(() => { paint(strokes, drawingRef.current); }, [strokes, paint]);
+
+  function pointFrom(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [
+      Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    ];
+  }
+
+  function start(event: ReactPointerEvent<HTMLCanvasElement>) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drawingRef.current = pointFrom(event);
+    paint(strokes, drawingRef.current);
+  }
+
+  function extend(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!drawingRef.current) return;
+    drawingRef.current.push(...pointFrom(event));
+    paint(strokes, drawingRef.current);
+  }
+
+  function finish() {
+    const stroke = drawingRef.current;
+    drawingRef.current = null;
+    if (!stroke || stroke.length < 4) {
+      paint(strokes, null);
+      return;
+    }
+    onChange([...strokes, stroke.map((n) => Math.round(n * 10_000) / 10_000)]);
+  }
+
+  return (
+    <div className="sketchpad">
+      <canvas
+        ref={canvasRef}
+        width={SKETCH_WIDTH}
+        height={SKETCH_HEIGHT}
+        onPointerDown={start}
+        onPointerMove={extend}
+        onPointerUp={finish}
+        onPointerCancel={finish}
+        aria-label="Architecture sketch canvas. Draw your design before revealing the reference."
+        role="img"
+      />
+      <div className="sketchpad-tools">
+        <p>{strokes.length === 0 ? "Draw the components and the request path." : `${strokes.length} stroke${strokes.length === 1 ? "" : "s"}`}</p>
+        <div>
+          <button className="button quiet" onClick={() => onChange(strokes.slice(0, -1))} disabled={strokes.length === 0}>Undo</button>
+          <button className="button quiet" onClick={() => onChange([])} disabled={strokes.length === 0}>Clear</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 type SavedAttempt = PracticeDraft & {
   savedAt: string;
@@ -79,6 +198,21 @@ type Mistake = {
   resolved: boolean;
 };
 
+/**
+ * Scheduling state for one card. `interval` is in days and `ease` is the SM-2
+ * multiplier; both are recomputed on every grade. `due` is a local date key so
+ * the queue is stable within a calendar day regardless of study time.
+ */
+type SrsCard = {
+  due: string;
+  interval: number;
+  ease: number;
+  reps: number;
+  lapses: number;
+};
+
+type RecallGrade = "again" | "hard" | "good" | "easy";
+
 type StudyState = {
   version: 1;
   topics: Record<string, TopicProgress>;
@@ -88,9 +222,80 @@ type StudyState = {
   activityDates: string[];
   theme: "light" | "dark";
   draft: PracticeDraft;
+  srs: Record<string, SrsCard>;
 };
 
 const STORAGE_KEY = "ai-system-design-study:v1";
+
+const gradeButtons: Array<{ id: RecallGrade; label: string; hint: string }> = [
+  { id: "again", label: "Again", hint: "Could not recall" },
+  { id: "hard", label: "Hard", hint: "Recalled with effort" },
+  { id: "good", label: "Good", hint: "Recalled correctly" },
+  { id: "easy", label: "Easy", hint: "Instant and complete" },
+];
+
+/**
+ * Every schedulable card in the syllabus: one per free-recall card, plus one
+ * per multiple-choice question so the existing quiz bank also gets spaced.
+ */
+type ScheduledCard = {
+  key: string;
+  topicId: string;
+  topicTitle: string;
+  week: number;
+  kind: "recall" | "quiz";
+  prompt: string;
+  answer: string;
+  options?: string[];
+  answerIndex?: number;
+};
+
+const allCards: ScheduledCard[] = allTopics.flatMap((topic) => [
+  ...topic.recallCards.map((card) => ({
+    key: `${topic.id}::r::${card.id}`,
+    topicId: topic.id,
+    topicTitle: topic.title,
+    week: topic.week,
+    kind: "recall" as const,
+    prompt: card.prompt,
+    answer: card.answer,
+  })),
+  ...topic.quiz.map((question, index) => ({
+    key: `${topic.id}::q::${index}`,
+    topicId: topic.id,
+    topicTitle: topic.title,
+    week: topic.week,
+    kind: "quiz" as const,
+    prompt: question.prompt,
+    answer: question.explanation,
+    options: question.options,
+    answerIndex: question.answerIndex,
+  })),
+]);
+
+const cardsByKey = new Map(allCards.map((card) => [card.key, card]));
+
+function newSrsCard(due: string): SrsCard {
+  return { due, interval: 0, ease: 2.5, reps: 0, lapses: 0 };
+}
+
+/**
+ * SM-2 with a simplified learning phase. "Again" resets the interval and drops
+ * ease, so a lapsed card returns tomorrow rather than being lost in the backlog.
+ */
+function scheduleCard(card: SrsCard, grade: RecallGrade): SrsCard {
+  const ease = Math.max(1.3, card.ease + { again: -0.2, hard: -0.15, good: 0, easy: 0.15 }[grade]);
+  if (grade === "again") {
+    return { due: tomorrowPlus(1), interval: 1, ease, reps: 0, lapses: card.lapses + 1 };
+  }
+  const interval = card.reps === 0
+    ? { hard: 1, good: 1, easy: 3 }[grade]
+    : card.reps === 1
+      ? { hard: 3, good: 6, easy: 10 }[grade]
+      : Math.round(card.interval * ease * (grade === "hard" ? 0.6 : grade === "easy" ? 1.3 : 1));
+  const capped = Math.min(365, Math.max(1, interval));
+  return { due: tomorrowPlus(capped), interval: capped, ease, reps: card.reps + 1, lapses: card.lapses };
+}
 
 const practiceFields: Array<{
   id: PracticeField;
@@ -124,10 +329,11 @@ const navItems: Array<{ id: View; index: string; label: string }> = [
   { id: "dashboard", index: "01", label: "Today" },
   { id: "curriculum", index: "02", label: "Curriculum" },
   { id: "topic", index: "03", label: "Topic lab" },
-  { id: "drills", index: "04", label: "Estimation" },
-  { id: "practice", index: "05", label: "Design practice" },
-  { id: "mock", index: "06", label: "Mock interview" },
-  { id: "review", index: "07", label: "Notes & review" },
+  { id: "recall", index: "04", label: "Recall" },
+  { id: "drills", index: "05", label: "Estimation" },
+  { id: "practice", index: "06", label: "Design practice" },
+  { id: "mock", index: "07", label: "Mock interview" },
+  { id: "review", index: "08", label: "Notes & review" },
 ];
 
 function emptyFields(): Record<PracticeField, string> {
@@ -166,6 +372,7 @@ function makeDraft(prompt: DesignPrompt, id = `draft-${prompt.id}`): PracticeDra
     secondsRemaining: prompt.durationMinutes * 60,
     fields: emptyFields(),
     scores: defaultScores(),
+    sketch: [],
   };
 }
 
@@ -184,6 +391,7 @@ function defaultState(): StudyState {
     activityDates: [],
     theme: "light",
     draft: makeDraft(designPrompts[0]),
+    srs: {},
   };
 }
 
@@ -281,7 +489,31 @@ function normalizeDraft(value: unknown): PracticeDraft {
     secondsRemaining: seconds,
     fields: normalizeFields(raw.fields),
     scores: normalizeScores(raw.scores),
+    sketch: normalizeSketch(raw.sketch),
   };
+}
+
+/**
+ * Drops schedules for cards that no longer exist and clamps every numeric
+ * field, so an edited or stale payload cannot poison the review queue.
+ */
+function normalizeSrs(value: unknown): Record<string, SrsCard> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, SrsCard> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!cardsByKey.has(key) || !isRecord(raw)) continue;
+    if (typeof raw.due !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(raw.due)) continue;
+    const num = (input: unknown, fallback: number, min: number, max: number) =>
+      typeof input === "number" && Number.isFinite(input) ? Math.min(max, Math.max(min, input)) : fallback;
+    result[key] = {
+      due: raw.due,
+      interval: Math.round(num(raw.interval, 0, 0, 365)),
+      ease: num(raw.ease, 2.5, 1.3, 3.5),
+      reps: Math.round(num(raw.reps, 0, 0, 10_000)),
+      lapses: Math.round(num(raw.lapses, 0, 0, 10_000)),
+    };
+  }
+  return result;
 }
 
 function normalizeAttempt(value: unknown): SavedAttempt | null {
@@ -342,10 +574,20 @@ function mergeStoredState(raw: string): StudyState {
         : [],
       theme: saved.theme === "dark" ? "dark" : "light",
       draft: normalizeDraft(saved.draft),
+      srs: normalizeSrs(saved.srs),
     };
   } catch {
     return fallback;
   }
+}
+
+/** Human-readable preview of where each grade would send the card. */
+function describeNextInterval(card: SrsCard, grade: RecallGrade) {
+  const days = scheduleCard(card, grade).interval;
+  if (days === 1) return "1 day";
+  if (days < 30) return `${days} days`;
+  if (days < 365) return `${Math.round(days / 30)} mo`;
+  return "1 yr";
 }
 
 function tomorrowPlus(days: number) {
@@ -370,6 +612,11 @@ export default function Home() {
   const [practiceCategory, setPracticeCategory] = useState<DesignCategory>("classic");
   const [referenceRevealed, setReferenceRevealed] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState<Record<string, Record<number, number>>>({});
+  const [recallRevealed, setRecallRevealed] = useState(false);
+  const [recallScope, setRecallScope] = useState<"due" | "topic">("due");
+  // Keys graded in this sitting. Needed because a topic drill ignores due dates,
+  // so without it the queue would re-serve the card that was just answered.
+  const [sessionSeen, setSessionSeen] = useState<string[]>([]);
   const [mistakeForm, setMistakeForm] = useState({
     category: mistakeCategories[0] as MistakeCategory,
     mistake: "",
@@ -470,6 +717,35 @@ export default function Home() {
   const activePrompt = designPrompts.find((prompt) => prompt.id === study.draft.promptId) ?? designPrompts[0];
   const visiblePrompts = designPrompts.filter((prompt) => prompt.category === practiceCategory);
   const unresolvedMistakes = study.mistakes.filter((mistake) => !mistake.resolved);
+
+  /**
+   * Cards are due when scheduled on or before today. Unseen cards only enter the
+   * queue once their module is started, so the backlog tracks study rather than
+   * dumping all 318 cards on day one. Overdue cards come first, then new ones.
+   */
+  const dueCards = useMemo(() => {
+    const today = localDateKey();
+    return allCards
+      .filter((card) => {
+        const scheduled = study.srs[card.key];
+        if (scheduled) return scheduled.due <= today;
+        return study.topics[card.topicId]?.status !== "not-started";
+      })
+      .sort((a, b) => {
+        const dueA = study.srs[a.key]?.due ?? "9999-12-31";
+        const dueB = study.srs[b.key]?.due ?? "9999-12-31";
+        return dueA.localeCompare(dueB) || a.week - b.week || a.key.localeCompare(b.key);
+      });
+  }, [study.srs, study.topics]);
+
+  const topicCards = useMemo(
+    () => allCards.filter((card) => card.topicId === activeTopicId),
+    [activeTopicId],
+  );
+
+  const recallQueue = (recallScope === "topic" ? topicCards : dueCards)
+    .filter((card) => !sessionSeen.includes(card.key));
+  const activeCard = recallQueue[0];
   const weakTopics = allTopics.filter((topic) => {
     const progress = study.topics[topic.id];
     return progress?.confidence <= 2 && progress.status !== "completed";
@@ -536,6 +812,26 @@ export default function Home() {
       ...current,
       [topicId]: { ...(current[topicId] ?? {}), [questionIndex]: optionIndex },
     }));
+  }
+
+  function gradeRecall(cardKey: string, grade: RecallGrade) {
+    setStudy((current) => ({
+      ...current,
+      activityDates: addActivity(current.activityDates),
+      srs: {
+        ...current.srs,
+        [cardKey]: scheduleCard(current.srs[cardKey] ?? newSrsCard(localDateKey()), grade),
+      },
+    }));
+    setRecallRevealed(false);
+    setSessionSeen((current) => (current.includes(cardKey) ? current : [...current, cardKey]));
+  }
+
+  function startRecall(scope: "due" | "topic") {
+    setRecallScope(scope);
+    setRecallRevealed(false);
+    setSessionSeen([]);
+    selectView("recall");
   }
 
   function openTopicExercise() {
@@ -687,6 +983,8 @@ export default function Home() {
     setPracticeCategory(designPrompts[0].category);
     setReferenceRevealed(false);
     setQuizAnswers({});
+    setSessionSeen([]);
+    setRecallRevealed(false);
     setSaveNotice("Local study data reset.");
   }
 
@@ -739,10 +1037,11 @@ export default function Home() {
             <strong>{streak}</strong>
             <p>day study streak</p>
           </article>
-          <article>
+          <article className={dueCards.length > 0 ? "metric-actionable" : undefined}>
             <span className="metric-index">B</span>
-            <strong>{study.attempts.length}</strong>
-            <p>saved designs</p>
+            <strong>{dueCards.length}</strong>
+            <p>cards due for recall</p>
+            {dueCards.length > 0 ? <button className="metric-action" onClick={() => startRecall("due")}>Start review →</button> : null}
           </article>
           <article>
             <span className="metric-index">C</span>
@@ -1054,6 +1353,15 @@ export default function Home() {
             </ul>
           </article>
 
+          <article className="paper-panel topic-wide recall-cta">
+            <div>
+              <p className="eyebrow">Retrieval practice</p>
+              <h2>Close the page and say it back.</h2>
+              <p>{topicCards.length} scheduled cards for this module. Free recall builds the pathway you need under interview pressure; recognising a right answer in a list does not.</p>
+            </div>
+            <button className="button primary" onClick={() => startRecall("topic")}>Drill this module</button>
+          </article>
+
           <article className="paper-panel topic-wide quiz-panel">
             <div className="section-heading">
               <div><p className="eyebrow">Knowledge check</p><h2>Commit before revealing the reasoning.</h2></div>
@@ -1115,6 +1423,101 @@ export default function Home() {
             <p className="save-hint">Saved on this device as you type.</p>
           </article>
         </div>
+      </section>
+    );
+  }
+
+  function renderRecall() {
+    const graded = sessionSeen.length;
+    const remaining = recallQueue.length;
+    const scheduled = activeCard ? study.srs[activeCard.key] : undefined;
+
+    return (
+      <section aria-labelledby="recall-title">
+        <div className="page-intro">
+          <div>
+            <p className="eyebrow">Retrieval practice</p>
+            <h1 id="recall-title">Answer first. Then reveal.</h1>
+          </div>
+          <p>Say the answer out loud before revealing it. Grading yourself honestly is what sets the next interval—marking a card you fumbled as Good is only cheating the schedule.</p>
+        </div>
+
+        <div className="recall-toolbar">
+          <div className="recall-scope" role="group" aria-label="Review scope">
+            <button className={recallScope === "due" ? "active" : ""} onClick={() => startRecall("due")}>
+              Due today<span>{dueCards.length}</span>
+            </button>
+            <button className={recallScope === "topic" ? "active" : ""} onClick={() => startRecall("topic")}>
+              This module<span>{topicCards.length}</span>
+            </button>
+          </div>
+          <p className="recall-counter" aria-live="polite">
+            {graded} graded · {remaining} left
+          </p>
+        </div>
+
+        {activeCard ? (
+          <article className="paper-panel recall-card">
+            <div className="recall-card-meta">
+              <span className={`recall-kind ${activeCard.kind}`}>{activeCard.kind === "recall" ? "Free recall" : "Multiple choice"}</span>
+              <span>{activeCard.topicTitle}</span>
+              {scheduled ? (
+                <span className="recall-history">
+                  {scheduled.reps} review{scheduled.reps === 1 ? "" : "s"}
+                  {scheduled.lapses > 0 ? ` · ${scheduled.lapses} lapse${scheduled.lapses === 1 ? "" : "s"}` : ""}
+                </span>
+              ) : <span className="recall-history">New card</span>}
+            </div>
+
+            <h2 className="recall-prompt">{activeCard.prompt}</h2>
+
+            {activeCard.kind === "quiz" && activeCard.options ? (
+              <ol className="recall-options">
+                {activeCard.options.map((option, index) => (
+                  <li key={option} className={recallRevealed && index === activeCard.answerIndex ? "correct" : ""}>
+                    <span>{String.fromCharCode(65 + index)}</span>{option}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+
+            {recallRevealed ? (
+              <div className="recall-answer" role="region" aria-live="polite">
+                <p className="eyebrow">Model answer</p>
+                <p>{activeCard.answer}</p>
+              </div>
+            ) : (
+              <button className="button primary recall-reveal" onClick={() => setRecallRevealed(true)}>
+                Reveal answer
+              </button>
+            )}
+
+            {recallRevealed ? (
+              <div className="recall-grades">
+                {gradeButtons.map((button) => (
+                  <button key={button.id} className={`grade-${button.id}`} onClick={() => gradeRecall(activeCard.key, button.id)}>
+                    <strong>{button.label}</strong>
+                    <small>{button.hint}</small>
+                    <span>{describeNextInterval(study.srs[activeCard.key] ?? newSrsCard(localDateKey()), button.id)}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </article>
+        ) : (
+          <article className="paper-panel empty-state">
+            <strong>{graded > 0 ? `Session complete — ${graded} card${graded === 1 ? "" : "s"} graded.` : "Nothing due right now."}</strong>
+            <p>
+              {recallScope === "due"
+                ? "Cards enter this queue once you start their module, then return on their own schedule. Start a module in the topic lab to add its cards."
+                : "This module has no cards left in the current session."}
+            </p>
+            <div className="hero-actions">
+              <button className="button quiet" onClick={() => selectView("topic")}>Back to topic lab</button>
+              {recallScope === "topic" ? <button className="button quiet" onClick={() => startRecall("due")}>Review due cards</button> : null}
+            </div>
+          </article>
+        )}
       </section>
     );
   }
@@ -1287,11 +1690,34 @@ export default function Home() {
           ))}
         </div>
 
+        <article className="paper-panel sketch-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Whiteboard</p>
+              <h2>Draw the architecture.</h2>
+            </div>
+            <span className="section-note">Boxes, arrows, and one request path</span>
+          </div>
+          <p className="sketch-note">
+            The interview is a drawing exercise. Sketch components and the flow between them before you reveal the reference—
+            a diagram you cannot draw from memory is one you do not yet own.
+          </p>
+          <SketchPad
+            strokes={study.draft.sketch}
+            onChange={(sketch) => setStudy((current) => ({ ...current, draft: { ...current.draft, sketch } }))}
+            theme={study.theme}
+          />
+        </article>
+
         <section className="reference-gate" aria-labelledby="reference-heading">
           <div>
             <p className="eyebrow inverted">Calibration guide</p>
             <h2 id="reference-heading">Compare against a senior-level reference.</h2>
-            <p>Attempt the design first. The guide is a decision map—not the only valid architecture.</p>
+            <p>
+              {study.draft.sketch.length === 0 && !referenceRevealed
+                ? "Sketch the architecture above first—comparing before attempting turns practice into reading."
+                : "Attempt the design first. The guide is a decision map—not the only valid architecture."}
+            </p>
           </div>
           <button
             className="button light"
@@ -1299,7 +1725,7 @@ export default function Home() {
             aria-expanded={referenceRevealed}
             aria-controls="reference-solution"
           >
-            {referenceRevealed ? "Hide reference" : "Reveal reference"}
+            {referenceRevealed ? "Hide reference" : study.draft.sketch.length === 0 ? "Reveal anyway" : "Reveal reference"}
           </button>
           <span className="sr-only" role="status" aria-live="polite">
             {referenceRevealed ? "Reference solution revealed." : ""}
@@ -1552,6 +1978,7 @@ export default function Home() {
     dashboard: renderDashboard,
     curriculum: renderCurriculum,
     topic: renderTopic,
+    recall: renderRecall,
     drills: renderDrills,
     practice: renderPractice,
     mock: renderMock,

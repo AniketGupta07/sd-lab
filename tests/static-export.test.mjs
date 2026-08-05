@@ -87,18 +87,19 @@ test("uses the exact build base path for exported Next assets", async () => {
 test("ships technically deep content for every week and interview track", async () => {
   const files = await Promise.all(contentPaths.map((name) => readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8")));
   const content = files.join("\n");
-  const topicWeeks = Array.from(content.matchAll(/^\s+week:\s*([1-8]),\s*$/gm), (match) => Number(match[1]));
-  const expectedWeekCounts = [7, 5, 6, 6, 7, 5, 7, 6];
+  // Two digits: a [1-8] class silently drops weeks 9-12 instead of failing.
+  const topicWeeks = Array.from(content.matchAll(/^\s+week:\s*(\d{1,2}),\s*$/gm), (match) => Number(match[1]));
+  const expectedWeekCounts = [4, 4, 5, 4, 4, 4, 5, 4, 5, 4, 5, 5];
   const promptCategories = Array.from(
     content.matchAll(/^\s+category:\s*"(classic|ml|llm)",?\s*$/gm),
     (match) => match[1],
   );
 
-  assert.equal(topicWeeks.length, 49, "expected exactly 49 curriculum modules");
+  assert.equal(topicWeeks.length, 53, "expected exactly 53 curriculum modules");
   assert.deepEqual(
     expectedWeekCounts.map((_, index) => topicWeeks.filter((week) => week === index + 1).length),
     expectedWeekCounts,
-    "all eight weeks must ship their complete module set",
+    "all twelve weeks must ship their complete module set",
   );
   assert.equal(promptCategories.length, 25, "expected exactly 25 design prompts");
   assert.deepEqual(
@@ -115,15 +116,49 @@ test("ships technically deep content for every week and interview track", async 
   assert.match(content, /all-reduce/i);
   assert.match(content, /prompt injection/i);
   assert.match(content, /reference:\s*\{/);
+
+  // Gaps closed deliberately; each was absent from the original syllabus and is
+  // asked about often enough that silent removal should fail the build.
+  assert.match(content, /OAuth 2\.0/, "authentication must be covered");
+  assert.match(content, /OpenID Connect/);
+  assert.match(content, /two-phase commit/i, "atomic commitment must be covered");
+  assert.match(content, /\bsaga\b/i);
+  assert.match(content, /version vector/i, "causality tracking must be covered");
+  assert.match(content, /\bCRDT/, "convergent replicated types must be covered");
+  assert.match(content, /gossip/i, "membership dissemination must be covered");
+  assert.match(content, /service discovery|service registry/i);
+  assert.match(content, /\bPaxos\b/, "the consensus family must be named");
+  assert.match(content, /Kafka/, "log brokers must be nameable, not only described");
+  assert.match(content, /GDPR|right to erasure/i, "regulatory deletion must be covered");
+  assert.match(content, /fencing|fenced/i);
+});
+
+test("schedules free-recall cards for every module", async () => {
+  const files = await Promise.all(contentPaths.map((name) => readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8")));
+  const content = files.join("\n");
+  const moduleCount = content.match(/^\s+estimatedMinutes:/gm)?.length ?? 0;
+  const cardBlocks = content.match(/^\s+recallCards: \[/gm)?.length ?? 0;
+  // Tolerate a line break between fields: cards are authored both inline and wrapped.
+  const cards = Array.from(content.matchAll(
+    /\{\s*id: "[a-z0-9-]+",\s*prompt: "((?:[^"\\]|\\.)*)",\s*answer: "((?:[^"\\]|\\.)*)"\s*\}/g,
+  ));
+
+  assert.equal(cardBlocks, moduleCount, "every module needs a recallCards block");
+  assert.ok(cards.length >= moduleCount * 2, `expected at least ${moduleCount * 2} recall cards, found ${cards.length}`);
+
+  // A recall card is only useful if the answer is a full model answer rather
+  // than a stub — that is what the learner grades themselves against.
+  const thin = cards.filter(([, prompt, answer]) => prompt.length < 40 || answer.length < 200);
+  assert.deepEqual(thin.map(([, prompt]) => prompt), [], "recall cards must carry a substantive model answer");
 });
 
 test("renders selectors for every week and every prompt category", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const studyData = await readFile(new URL("../app/studyData.ts", import.meta.url), "utf8");
   const weekPlanBlock = studyData.match(/export const curriculumWeeks:[\s\S]*?= \[([\s\S]*?)\n\];/)?.[1] ?? "";
-  const weekSelectors = Array.from(weekPlanBlock.matchAll(/^\s+week:\s*([1-8]),\s*$/gm), (match) => Number(match[1]));
+  const weekSelectors = Array.from(weekPlanBlock.matchAll(/^\s+week:\s*(\d{1,2}),\s*$/gm), (match) => Number(match[1]));
 
-  assert.deepEqual(weekSelectors, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(weekSelectors, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   assert.match(page, /className="topic-week-tabs"[\s\S]*?curriculumWeeks\.map\(\(week\)/);
   assert.match(page, /const visiblePrompts = designPrompts\.filter\(\(prompt\) => prompt\.category === practiceCategory\)/);
   assert.match(page, /\(\["classic",\s*"ml",\s*"llm"\] as DesignCategory\[\]\)\.map/);
@@ -154,8 +189,32 @@ test("keeps personal study data local, versioned, and migration-preserving", asy
   assert.match(page, /activityDates:\s*Array\.isArray\(saved\.activityDates\)/);
   assert.match(page, /draft:\s*normalizeDraft\(saved\.draft\)/);
   assert.match(page, /designPrompts\.some\(\(prompt\) => prompt\.id === value\.promptId\)/, "attempts for prompts that no longer exist must be dropped");
+
+  // Review schedules and sketches are restored through the same validating path.
+  assert.match(page, /srs:\s*normalizeSrs\(saved\.srs\)/);
+  assert.match(page, /if \(!cardsByKey\.has\(key\) \|\| !isRecord\(raw\)\) continue/, "schedules for deleted cards must be dropped");
+  assert.match(page, /sketch:\s*normalizeSketch\(raw\.sketch\)/);
+  assert.match(page, /stroke\.length % 2 === 0/, "malformed sketch strokes must be rejected");
   assert.match(layout, /NEXT_PUBLIC_SITE_URL/);
   assert.doesNotMatch(layout, /next\/headers|codex-preview|Starter Project/);
+});
+
+test("keeps retrieval practice and the whiteboard honest", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  // Free recall must not reveal the answer before the learner commits, and the
+  // grade must drive the next interval — otherwise it is not spaced repetition.
+  assert.match(page, /function scheduleCard\(card: SrsCard, grade: RecallGrade\): SrsCard/);
+  assert.match(page, /grade === "again"/, "a lapse must reset the interval");
+  assert.match(page, /Math\.max\(1\.3, card\.ease/, "ease must have a floor");
+  assert.match(page, /recallRevealed \? \(/, "the answer must stay hidden until revealed");
+  assert.match(page, /allTopics\.flatMap\(\(topic\) => \[/, "both recall cards and quiz items must be scheduled");
+  assert.match(page, /study\.topics\[card\.topicId\]\?\.status !== "not-started"/, "unstarted modules must not flood the queue");
+
+  // The sketch is the point of the whiteboard: it must persist with the attempt.
+  assert.match(page, /function SketchPad\(/);
+  assert.match(page, /touch-action|setPointerCapture/, "drawing must work with pointer input");
+  assert.match(page, /draft: \{ \.\.\.current\.draft, sketch \}/, "sketches must persist with the draft");
 });
 
 test("keeps personal information out of publishable source", async () => {

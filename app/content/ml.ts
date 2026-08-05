@@ -3,7 +3,7 @@ import type { DesignPrompt, StudyTopic } from "./types";
 export const mlTopics: StudyTopic[] = [
   {
     id: "ml-problem-framing",
-    week: 5,
+    week: 8,
     day: 1,
     tier: 2,
     title: "Frame the ML problem before choosing a model",
@@ -137,10 +137,14 @@ export const mlTopics: StudyTopic[] = [
           "A comparable baseline separates genuine model value from data or policy changes and provides graceful degradation.",
       },
     ],
+    recallCards: [
+      { id: "mlf-decision", prompt: "State the questions that convert a vague product ask into a machine-learning problem specification.", answer: "What single decision does the system make, who or what consumes it, and what action follows automatically? What is the prediction target, expressed as something observable in logged data? What is the unit of prediction and the latency budget at serving time? What is the baseline the model must beat, including the trivial heuristic? And what would make the model harmful enough to roll back? If the answer is not one deployable decision with a measurable consequence, the framing is not finished." },
+      { id: "mlf-baseline", prompt: "Explain why a non-model baseline is mandatory before proposing an architecture.", answer: "A simple heuristic - most popular, most recent, last value, or a small logistic regression on a few features - establishes whether the problem needs learning at all and sets the bar every later comparison is measured against. It also exposes the data plumbing, latency budget, and evaluation harness at low cost, so the expensive model is built against infrastructure already proven. Skipping it is how teams ship a model that a two-line rule would have matched." },
+    ],
   },
   {
     id: "ml-metrics-slices",
-    week: 5,
+    week: 8,
     day: 2,
     tier: 2,
     title: "Select metrics and evaluate the slices that matter",
@@ -274,6 +278,10 @@ export const mlTopics: StudyTopic[] = [
           "Log loss is a proper scoring rule for predicted probabilities; ranking-only metrics do not establish probability quality.",
       },
     ],
+    recallCards: [
+      { id: "mlm-roc-pr", prompt: "Explain why ROC-AUC can look strong while a rare-event model is unusable, and what to use instead.", answer: "ROC plots true-positive rate against false-positive rate, and the false-positive rate divides by the large negative population, so even a large absolute number of false positives barely moves it. On a rare-event problem a model can therefore hold a high ROC-AUC while nearly every alert it produces is wrong. Precision-recall exposes this because its no-skill baseline equals the positive prevalence, and precision directly measures the fraction of flagged cases that are real. Evaluate at the operating region the product can actually afford: precision at review capacity, or recall at a fixed false-positive budget." },
+      { id: "mlm-slices", prompt: "Describe how to evaluate slices without turning the dashboard into a multiple-comparisons trap.", answer: "Predeclare the slices that matter from product mechanics - cold start, geography, device, traffic source, long-tail items, high-severity cases - rather than discovering an interesting cut after seeing results. Report the denominator, prevalence, confidence interval, and calibration per slice, so small slices show as uncertain instead of producing confident spurious rankings. Gate releases on regressions in critical slices, pool or hierarchically shrink tiny slices, and treat post-hoc slice discovery as hypothesis generation requiring separate confirmation." },
+    ],
     furtherReading: [
       {
         label: "Davis and Goadrich: The Relationship Between Precision-Recall and ROC Curves",
@@ -283,7 +291,7 @@ export const mlTopics: StudyTopic[] = [
   },
   {
     id: "ml-data-labels-leakage",
-    week: 5,
+    week: 8,
     day: 3,
     tier: 2,
     title: "Build labels and datasets with point-in-time correctness",
@@ -417,10 +425,14 @@ export const mlTopics: StudyTopic[] = [
           "A chronological backtest respects causality and exposes changes between training and future serving periods.",
       },
     ],
+    recallCards: [
+      { id: "mld-pit", prompt: "Explain what a point-in-time join is and the two timestamps it requires.", answer: "For a training row anchored at decision time t, a point-in-time join attaches only feature values the serving system could actually have known at t. That requires two timestamps per feature event: event time, when the fact became true in the world, and availability time, when it landed in the store and became readable. Joining on event time alone leaks, because a value that occurred before t but only arrived in the pipeline afterwards would not have been available online. Late corrections need bitemporal or immutable versioned records so a backfill cannot rewrite history with knowledge acquired later." },
+      { id: "mld-maturity", prompt: "Explain why an unlabeled recent example must not be treated as a negative.", answer: "With an outcome window, a recent example may simply not have had time to convert, charge back, or be reported, so labeling it negative systematically mislabels exactly the freshest data and teaches the model that recent means negative. Record label_status and mature_at, exclude immature rows from training and evaluation, or use censoring-aware or positive-unlabeled methods that model the incomplete observation explicitly. Otherwise offline metrics look fine while the model degrades on precisely the traffic it will serve." },
+    ],
   },
   {
     id: "ml-feature-platforms",
-    week: 5,
+    week: 8,
     day: 4,
     tier: 2,
     title: "Design feature platforms with training-serving parity",
@@ -559,11 +571,15 @@ export const mlTopics: StudyTopic[] = [
           "Versioned, gated promotion preserves reproducibility and allows rollback if recomputation changes semantics.",
       },
     ],
+    recallCards: [
+      { id: "mlfp-skew", prompt: "Define training-serving skew and name its most common causes.", answer: "Training-serving skew is any difference between the feature values a model learned from and the values it receives online, and it degrades production quality while offline metrics stay healthy. Common causes are separate implementations of the same transformation in batch and serving code, different default and null handling, aggregation windows computed over different boundaries, feature freshness differing between the two paths, and training rows built with data unavailable at serve time. The structural fix is a single transformation definition executed by both paths, plus continuous comparison of logged serving values against training values." },
+      { id: "mlfp-online-offline", prompt: "Explain the roles of the offline and online feature stores and what must stay consistent.", answer: "The offline store holds full history for building training sets and supports point-in-time correct joins; the online store holds only current values keyed for low-latency lookup at serving. Both must be produced by the same transformation logic from the same source events, and the online value for an entity must be reproducible from the offline history at the same timestamp. Logging the exact feature vector used for each online prediction is what makes this verifiable rather than assumed." },
+    ],
   },
   {
     id: "ml-retrieval-ann",
-    week: 5,
-    day: 5,
+    week: 9,
+    day: 1,
     tier: 2,
     title: "Retrieve candidates with two-tower models and ANN indexes",
     eyebrow: "Week 5 · Day 5",
@@ -701,6 +717,10 @@ export const mlTopics: StudyTopic[] = [
           "PQ splits vectors into subvectors and stores codebook indices, reducing memory while approximating distances.",
       },
     ],
+    recallCards: [
+      { id: "mlr-two-stage", prompt: "Explain why retrieval and ranking are separate stages.", answer: "Scoring every candidate with an expensive model is impossible when the corpus is millions of items and the latency budget is tens of milliseconds. Retrieval cheaply reduces the corpus to hundreds or low thousands of plausible candidates, optimizing recall because anything it drops can never be recovered; ranking then applies a costly, feature-rich model to that small set, optimizing precision at the top. The separation lets each stage use the appropriate model class and makes candidate recall a first-class metric distinct from final ranking quality." },
+      { id: "mlr-hnsw", prompt: "Describe HNSW's structure and the trade-off its parameters control.", answer: "HNSW builds a multi-layer navigable small-world graph: sparse upper layers provide long-range links for fast coarse navigation, and progressively denser lower layers refine locally, so search descends greedily from an entry point instead of scanning. It gives approximate results with high recall at low latency, and the parameters trade directly - larger construction degree and search breadth raise recall and latency and memory, smaller values lower all three. Its practical costs are memory-resident graph links and awkward incremental deletion, which is usually handled with tombstones and periodic rebuilds." },
+    ],
     furtherReading: [
       {
         label: "Malkov and Yashunin: Efficient and Robust Approximate Nearest Neighbor Search Using HNSW",
@@ -714,8 +734,8 @@ export const mlTopics: StudyTopic[] = [
   },
   {
     id: "ml-ranking-policy",
-    week: 5,
-    day: 6,
+    week: 9,
+    day: 2,
     tier: 2,
     title: "Rank in stages and enforce product constraints",
     eyebrow: "Week 5 · Day 6",
@@ -853,11 +873,15 @@ export const mlTopics: StudyTopic[] = [
           "Support or overlap is essential; actions never exposed by the logger have no outcome evidence to reweight.",
       },
     ],
+    recallCards: [
+      { id: "mlrp-position-bias", prompt: "Explain position bias and why training naively on click logs degrades a ranker.", answer: "Users click what they are shown, and higher-ranked items receive more clicks regardless of relevance, so click logs reflect the previous ranker's exposure as much as user preference. Training directly on them teaches the model to reproduce the incumbent's ordering and creates a feedback loop that entrenches it, while starving unshown items of the data needed to prove they are good. Corrections include inverse-propensity weighting by estimated exposure, randomized or interleaved exploration slots, and position-aware models that treat rank as a feature at training and neutralize it at inference." },
+      { id: "mlrp-objective", prompt: "Describe why a ranker optimizing a single engagement metric is dangerous.", answer: "A single proxy such as click-through rate is optimized literally: the model learns clickbait, sensational content, and short-horizon engagement that harms retention and trust while the target metric improves. Production rankers therefore blend multiple objectives - predicted click, dwell or completion, explicit satisfaction, and negative feedback - with weights set by product judgment, and constrain the result with diversity, freshness, and safety requirements. Guardrail metrics that would detect the failure must be monitored alongside the objective, because the proxy improving is not evidence the product improved." },
+    ],
   },
   {
     id: "ml-training-evaluation-registry",
-    week: 5,
-    day: 7,
+    week: 9,
+    day: 3,
     tier: 2,
     title: "Make training reproducible and promotion evidence-based",
     eyebrow: "Week 5 · Day 7",
@@ -995,11 +1019,15 @@ export const mlTopics: StudyTopic[] = [
           "Paired comparisons exploit shared examples, yielding a more sensitive and interpretable estimate of the delta.",
       },
     ],
+    recallCards: [
+      { id: "mltr-reproduce", prompt: "List what must be versioned for a trained model to be reproducible and auditable.", answer: "The training dataset snapshot or its manifest, the feature transformation code and its version, model code, hyperparameters, random seeds, framework and library versions, hardware or precision settings where they affect results, and the resulting metrics with the evaluation set they were computed on. The registry entry ties these together with lineage, so any deployed model can be traced back to exactly the data and code that produced it - which is what makes a regression debuggable and an audit answerable." },
+      { id: "mltr-backtest", prompt: "Explain why a temporal backtest is required for a model that will serve future traffic.", answer: "Randomly splitting an evolving system leaks the future into training: the model sees examples from after the evaluation period and learns patterns it could not have known, so offline metrics overstate deployed performance. A temporal split trains on a past window and evaluates on the following one, mirroring deployment, and rolling-origin backtests across several such windows show whether performance is stable or decaying. Where entities repeat, group isolation must be applied inside the chronological folds so the same user does not appear on both sides." },
+    ],
   },
   {
     id: "ml-imbalance-calibration-thresholds",
-    week: 6,
-    day: 1,
+    week: 9,
+    day: 4,
     tier: 2,
     title: "Handle imbalance, calibration, and decision thresholds",
     eyebrow: "Week 6 · Day 1",
@@ -1137,6 +1165,10 @@ export const mlTopics: StudyTopic[] = [
           "A separate representative set estimates out-of-sample score-to-probability mapping without fitting to training errors.",
       },
     ],
+    recallCards: [
+      { id: "mlc-calibration", prompt: "Define calibration, explain how it differs from discrimination, and name the correction methods.", answer: "A model is calibrated when among cases assigned probability p, about p of them actually occur; discrimination is only the ability to rank positives above negatives. The two are independent: a model can rank perfectly while systematically overstating risk, which breaks any downstream decision that compares a probability to a cost threshold or sums expected values. Measure with reliability diagrams, Brier score, and ECE, and correct with Platt scaling for limited data with sigmoidal distortion, isotonic regression for ample data and arbitrary monotone distortion, or temperature scaling for multiclass logits, always fitted on held-out representative data after model selection." },
+      { id: "mlc-sampling", prompt: "Explain what downsampling negatives does to predicted probabilities.", answer: "Training on a re-balanced sample changes the base rate the model learns, so its outputs represent the sampled prevalence rather than production prevalence and are systematically inflated. Ranking is largely unaffected, which is why the problem hides behind a healthy AUC. Either keep example weights that restore the original distribution, apply a prior-shift correction to the logits - valid only if class-conditional feature distributions are stable - or recalibrate on an untouched validation set drawn at the true deployment base rate, which is the most reliable option." },
+    ],
     furtherReading: [
       {
         label: "Guo et al.: On Calibration of Modern Neural Networks",
@@ -1146,8 +1178,8 @@ export const mlTopics: StudyTopic[] = [
   },
   {
     id: "ml-delayed-high-stakes",
-    week: 6,
-    day: 2,
+    week: 9,
+    day: 5,
     tier: 2,
     title: "Reason about delayed labels and high-stakes decisions",
     eyebrow: "Week 6 · Day 2",
@@ -1280,11 +1312,15 @@ export const mlTopics: StudyTopic[] = [
           "The outcome window is incomplete, so absence of an event is not yet evidence of a negative.",
       },
     ],
+    recallCards: [
+      { id: "mlh-delay", prompt: "Explain how label delay constrains both training and monitoring.", answer: "When the outcome arrives weeks after the decision, the freshest data is unlabeled, so training on mature labels means training on a stale world while training on recent data means training on incomplete outcomes. Monitoring inherits the same gap: true performance cannot be measured until labels mature, so degradation must be detected through leading proxies - score distribution shift, feature drift, action rates, and early-maturing partial outcomes - with the authoritative metric confirmed later. Designs must state the delay explicitly and show which decisions rely on proxies versus confirmed labels." },
+      { id: "mlh-recourse", prompt: "Describe the obligations specific to high-stakes automated decisions.", answer: "Decisions affecting credit, employment, or access require an auditable record of the inputs, model version, and reason for each decision; an explanation the affected person can act on; a human review path for contested outcomes; and monitoring for disparate performance across protected groups with predeclared thresholds. Certain features may be legally prohibited, and proxies for them must be tested rather than assumed absent. The system must also support recourse - a person changing their circumstances should be able to change the outcome, which constrains the use of features they cannot influence." },
+    ],
   },
   {
     id: "ml-online-experimentation",
-    week: 6,
-    day: 3,
+    week: 10,
+    day: 1,
     tier: 2,
     title: "Run trustworthy online experiments",
     eyebrow: "Week 6 · Day 3",
@@ -1422,11 +1458,15 @@ export const mlTopics: StudyTopic[] = [
           "Cluster assignment can contain spillovers when treated demand changes a shared supplier's state seen by control buyers.",
       },
     ],
+    recallCards: [
+      { id: "mle-srm", prompt: "Define sample-ratio mismatch, explain why it invalidates a result, and how to respond.", answer: "SRM is a statistically significant deviation between observed arm sizes and the intended allocation, tested with a chi-square against expected proportions. It matters because a mismatch means assignment or logging is broken, so the arms differ by more than the treatment and any measured lift is confounded regardless of how significant it looks. The response is to invalidate and investigate - assignment hashing, eligibility filters, bot filtering, redirect losses, differential logging - never to adjust the analysis to compensate, because the defect is in who entered the experiment, not in the arithmetic." },
+      { id: "mle-interference", prompt: "Explain interference and when user-level randomization stops being valid.", answer: "Standard analysis assumes one unit's treatment does not affect another's outcome. That breaks in marketplaces where treated buyers consume inventory that control buyers then cannot buy, in social products where treated users change what their untreated friends see, and wherever a shared budget, price, or model is affected. The result is bias that can point either direction and does not shrink with sample size. Mitigate by randomizing at the level of the interference - clusters, geographies, or entire markets - accepting far lower power, or by modeling the equilibrium effect directly." },
+    ],
   },
   {
     id: "ml-safe-deployment",
-    week: 6,
-    day: 4,
+    week: 10,
+    day: 2,
     tier: 2,
     title: "Deploy through shadow, canary, and rollback stages",
     eyebrow: "Week 6 · Day 4",
@@ -1564,11 +1604,15 @@ export const mlTopics: StudyTopic[] = [
           "The serving contract spans the complete release, and partial rollback can preserve the incompatibility that caused failure.",
       },
     ],
+    recallCards: [
+      { id: "mls-shadow", prompt: "Distinguish shadow, canary, and interleaving, and state what each can and cannot tell you.", answer: "Shadow mode runs the new model on live traffic without serving its output, validating infrastructure, latency, and score distribution with zero user risk - but it cannot measure user response because nobody sees the results. Canary serves a small traffic fraction, exposing real user impact and enabling fast rollback while limiting blast radius. Interleaving mixes results from two rankers within a single slate, giving a highly sensitive within-user preference comparison for ranking quality, though it cannot measure whole-product outcomes. A safe rollout usually uses all three in that order." },
+      { id: "mls-rollback", prompt: "Explain what makes a model rollback different from a code rollback.", answer: "Reverting the serving binary does not necessarily restore prior behavior, because the model artifact, the feature definitions it expects, and any state the model has already influenced are separate. A rollback must restore a pinned model version together with the compatible feature transformation version, and the deployment system needs both to be immutable and jointly versioned. Feedback effects complicate it further: a bad ranker changes what users saw and clicked, so the logs now contain its influence, and simply reverting the model does not undo the contaminated training data." },
+    ],
   },
   {
     id: "ml-drift-feedback-monitoring",
-    week: 6,
-    day: 5,
+    week: 10,
+    day: 3,
     tier: 2,
     title: "Monitor drift, feedback loops, and model health",
     eyebrow: "Week 6 · Day 5",
@@ -1705,6 +1749,10 @@ export const mlTopics: StudyTopic[] = [
         explanation:
           "Concept drift is a change in the conditional relationship P(Y|X), here caused by changed attacker behavior.",
       },
+    ],
+    recallCards: [
+      { id: "mldm-drift-types", prompt: "Distinguish covariate shift, label shift, and concept drift, and say which is most dangerous.", answer: "Covariate shift means the input distribution changed while the input-to-output relationship held; label shift means the outcome base rate moved; concept drift means the relationship itself changed, so the same input now implies a different outcome. Concept drift is the most dangerous because input monitoring cannot see it - features look entirely normal while the model is increasingly wrong - and it can only be detected once labels arrive or through a leading proxy. This is why monitoring must cover inputs, predictions, and outcomes rather than inputs alone." },
+      { id: "mldm-feedback", prompt: "Explain how a deployed model contaminates its own future training data.", answer: "The model's decisions determine what is observed: a fraud model that blocks a transaction never learns whether it would have been fraudulent, and a ranker only generates engagement data for items it chose to show. Training naively on these logs reinforces the model's existing beliefs and starves alternatives of evidence, so measured performance improves while true performance stagnates or declines. Breaking the loop requires deliberate exploration - a randomized holdout that bypasses the model, or logged propensities enabling inverse-propensity weighting - accepted as a standing cost of keeping the system honest." },
     ],
   },
 ];
