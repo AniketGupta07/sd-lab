@@ -64,7 +64,46 @@ export type StudyTopic = {
 
 export type DesignCategory = "classic" | "ml" | "llm";
 
+/**
+ * Node roles. These drive colour and shape so a diagram can be read at a
+ * glance: what stores state, what is merely compute, what crosses a trust
+ * boundary.
+ */
+export type DiagramNodeKind =
+  | "client"
+  | "edge"
+  | "service"
+  | "store"
+  | "cache"
+  | "stream"
+  | "compute"
+  | "external";
+
+/** `col`/`row` are grid coordinates, not pixels; the renderer computes layout. */
+export type DiagramNode = {
+  id: string;
+  label: string;
+  kind: DiagramNodeKind;
+  col: number;
+  row: number;
+};
+
+export type DiagramEdge = {
+  from: string;
+  to: string;
+  label?: string;
+  /** Dashed, for work that happens off the request path. */
+  async?: boolean;
+};
+
+export type ArchitectureDiagram = {
+  caption: string;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+};
+
 export type DesignReference = {
+  diagram: ArchitectureDiagram;
   scope: string[];
   apis: string[];
   dataModel: string[];

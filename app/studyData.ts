@@ -4,7 +4,7 @@ import { llmPrompts, llmTopics } from "./content/llm";
 import { mlPrompts, mlTopics } from "./content/ml";
 import type { CurriculumTier, DesignPrompt, StudyTopic } from "./content/types";
 
-export type { DesignCategory, DesignPrompt, StudyTopic } from "./content/types";
+export type { ArchitectureDiagram, DesignCategory, DesignPrompt, StudyTopic } from "./content/types";
 
 export type WeekPlan = {
   week: number;
@@ -207,6 +207,22 @@ function validateStudyContent(topics: StudyTopic[], prompts: DesignPrompt[]) {
       prompt.reference.observability,
     ];
     assertStudyContent(referenceGroups.every((group) => group.length >= 2), `${prompt.id} reference is incomplete`);
+
+    const { diagram } = prompt.reference;
+    const nodeIds = new Set(diagram.nodes.map((node) => node.id));
+    assertStudyContent(diagram.nodes.length >= 6, `${prompt.id} diagram needs a real component set`);
+    assertStudyContent(diagram.edges.length >= 6, `${prompt.id} diagram needs the flow between components`);
+    assertStudyContent(nodeIds.size === diagram.nodes.length, `${prompt.id} diagram node ids must be unique`);
+    assertStudyContent(diagram.caption.length >= 60, `${prompt.id} diagram needs an explanatory caption`);
+    for (const edge of diagram.edges) {
+      assertStudyContent(nodeIds.has(edge.from) && nodeIds.has(edge.to), `${prompt.id} diagram edge references a missing node`);
+    }
+    // Two nodes sharing a cell would render on top of each other.
+    const cells = diagram.nodes.map((node) => `${node.col}:${node.row}`);
+    assertStudyContent(new Set(cells).size === cells.length, `${prompt.id} diagram has overlapping nodes`);
+    // A node nothing connects to is almost always an authoring slip.
+    const connected = new Set(diagram.edges.flatMap((edge) => [edge.from, edge.to]));
+    assertStudyContent(diagram.nodes.every((node) => connected.has(node.id)), `${prompt.id} diagram has an unconnected node`);
   }
 }
 

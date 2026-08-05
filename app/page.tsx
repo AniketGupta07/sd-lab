@@ -9,6 +9,7 @@ import {
   interviewPhases,
   mistakeCategories,
   standardQuestions,
+  type ArchitectureDiagram,
   type DesignCategory,
   type DesignPrompt,
   type MistakeCategory,
@@ -74,6 +75,127 @@ type PracticeDraft = {
 
 const SKETCH_WIDTH = 1600;
 const SKETCH_HEIGHT = 900;
+
+const NODE_W = 158;
+const NODE_H = 58;
+const COL_GAP = 92;
+const ROW_GAP = 28;
+const DIAGRAM_PAD = 10;
+
+const nodeX = (col: number) => DIAGRAM_PAD + col * (NODE_W + COL_GAP);
+const nodeY = (row: number) => DIAGRAM_PAD + row * (NODE_H + ROW_GAP);
+
+/** Greedy wrap so labels stay inside the box without measuring text. */
+function wrapLabel(label: string, max = 20): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of label.split(" ")) {
+    if (!line.length) line = word;
+    else if (`${line} ${word}`.length <= max) line += ` ${word}`;
+    else { lines.push(line); line = word; }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 3);
+}
+
+/**
+ * Renders a reference architecture as inline SVG. Edges leave the right face
+ * and enter the left face when moving forward; same-column edges run
+ * vertically; backward edges bow underneath so they never trace over a box.
+ */
+function ArchitectureFigure({ diagram, id }: { diagram: ArchitectureDiagram; id: string }) {
+  const byId = new Map(diagram.nodes.map((node) => [node.id, node]));
+  const cols = Math.max(...diagram.nodes.map((node) => node.col)) + 1;
+  const rows = Math.max(...diagram.nodes.map((node) => node.row)) + 1;
+  const width = DIAGRAM_PAD * 2 + cols * NODE_W + (cols - 1) * COL_GAP;
+  const height = DIAGRAM_PAD * 2 + rows * NODE_H + (rows - 1) * ROW_GAP;
+  const marker = `arrow-${id}`;
+  const markerAsync = `arrow-async-${id}`;
+
+  const paths = diagram.edges.flatMap((edge) => {
+    const from = byId.get(edge.from);
+    const to = byId.get(edge.to);
+    if (!from || !to) return [];
+    const fx = nodeX(from.col);
+    const fy = nodeY(from.row);
+    const tx = nodeX(to.col);
+    const ty = nodeY(to.row);
+    let d: string;
+    let mid: { x: number; y: number };
+
+    if (from.col === to.col) {
+      const down = to.row > from.row;
+      const x = fx + NODE_W / 2;
+      const y1 = down ? fy + NODE_H : fy;
+      const y2 = down ? ty : ty + NODE_H;
+      d = `M ${x} ${y1} L ${x} ${y2}`;
+      mid = { x, y: (y1 + y2) / 2 };
+    } else if (to.col > from.col) {
+      const x1 = fx + NODE_W;
+      const y1 = fy + NODE_H / 2;
+      const x2 = tx;
+      const y2 = ty + NODE_H / 2;
+      const dx = Math.max(24, (x2 - x1) / 2);
+      d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+      mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 7 };
+    } else {
+      // Backward edge: drop below both boxes and return.
+      const x1 = fx + NODE_W / 2;
+      const y1 = fy + NODE_H;
+      const x2 = tx + NODE_W / 2;
+      const y2 = ty + NODE_H;
+      const dip = Math.max(y1, y2) + ROW_GAP * 0.8;
+      d = `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2}`;
+      mid = { x: (x1 + x2) / 2, y: dip + 4 };
+    }
+    return [{ edge, d, mid }];
+  });
+
+  return (
+    <figure className="arch-figure">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={diagram.caption} preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id={marker} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" className="arch-arrowhead" />
+          </marker>
+          <marker id={markerAsync} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" className="arch-arrowhead async" />
+          </marker>
+        </defs>
+
+        {paths.map(({ edge, d, mid }) => (
+          <g key={`${edge.from}-${edge.to}-${edge.label ?? ""}`}>
+            <path
+              d={d}
+              className={`arch-edge${edge.async ? " async" : ""}`}
+              markerEnd={`url(#${edge.async ? markerAsync : marker})`}
+            />
+            {edge.label ? (
+              <text x={mid.x} y={mid.y} className="arch-edge-label" textAnchor="middle">{edge.label}</text>
+            ) : null}
+          </g>
+        ))}
+
+        {diagram.nodes.map((node) => {
+          const x = nodeX(node.col);
+          const y = nodeY(node.row);
+          const lines = wrapLabel(node.label);
+          return (
+            <g key={node.id} className={`arch-node kind-${node.kind}`}>
+              <rect x={x} y={y} width={NODE_W} height={NODE_H} rx={node.kind === "store" || node.kind === "cache" ? 14 : 8} />
+              <text x={x + NODE_W / 2} y={y + NODE_H / 2 - (lines.length - 1) * 7} textAnchor="middle">
+                {lines.map((line, index) => (
+                  <tspan key={line} x={x + NODE_W / 2} dy={index === 0 ? 0 : 14}>{line}</tspan>
+                ))}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <figcaption>{diagram.caption}</figcaption>
+    </figure>
+  );
+}
 
 function normalizeSketch(value: unknown): Stroke[] {
   if (!Array.isArray(value)) return [];
@@ -223,7 +345,24 @@ type StudyState = {
   theme: "light" | "dark";
   draft: PracticeDraft;
   srs: Record<string, SrsCard>;
+  /** Section id -> collapsed. Absent means "use the section's default". */
+  collapsed: Record<string, boolean>;
 };
+
+/**
+ * Topic sections that can be folded away. Defaults give the page a reading
+ * order: mechanics first, the rest opened deliberately.
+ */
+const topicSections = {
+  mechanics: { eyebrow: "Mechanics", title: "What happens under the hood", defaultOpen: true },
+  tradeoffs: { eyebrow: "Trade-offs", title: "Say these aloud", defaultOpen: true },
+  failures: { eyebrow: "Failure diagnosis", title: "How this breaks in production", defaultOpen: false },
+  questions: { eyebrow: "Pressure questions", title: "What an interviewer will push on", defaultOpen: false },
+  checklist: { eyebrow: "Decision discipline", title: "Before leaving this topic", defaultOpen: false },
+  quiz: { eyebrow: "Knowledge check", title: "Commit before revealing the reasoning", defaultOpen: false },
+} as const;
+
+type TopicSectionId = keyof typeof topicSections;
 
 const STORAGE_KEY = "ai-system-design-study:v1";
 
@@ -314,6 +453,28 @@ const practiceFields: Array<{
   { id: "finalSummary", label: "Two-minute close", prompt: "Restate the design, biggest trade-off, first bottleneck, next evolution…", wide: true },
 ];
 
+/**
+ * The design room is worked one interview phase at a time rather than as one
+ * long scroll, so a timed attempt matches the clock the phases describe.
+ * Sketch, reference, and scoring are their own steps at the end.
+ */
+const practiceSteps: Array<{
+  id: string;
+  label: string;
+  minutes: string;
+  fields: PracticeField[];
+  kind?: "sketch" | "reference" | "score";
+}> = [
+  { id: "clarify", label: "Clarify", minutes: "3–5", fields: ["requirements", "assumptions"] },
+  { id: "estimate", label: "Estimate", minutes: "3–5", fields: ["estimation"] },
+  { id: "contract", label: "APIs + data", minutes: "3–5", fields: ["apis", "dataModel"] },
+  { id: "architecture", label: "Architecture", minutes: "5–7", fields: ["architecture"], kind: "sketch" },
+  { id: "deep-dive", label: "Deep dive", minutes: "15–20", fields: ["failureModes", "tradeoffs"] },
+  { id: "close", label: "Close", minutes: "≈5", fields: ["finalSummary"] },
+  { id: "compare", label: "Compare", minutes: "after", fields: [], kind: "reference" },
+  { id: "score", label: "Score", minutes: "after", fields: [], kind: "score" },
+];
+
 const scoreFields: Array<{ id: ScoreField; label: string }> = [
   { id: "requirements", label: "Requirements" },
   { id: "estimation", label: "Estimation" },
@@ -392,6 +553,7 @@ function defaultState(): StudyState {
     theme: "light",
     draft: makeDraft(designPrompts[0]),
     srs: {},
+    collapsed: {},
   };
 }
 
@@ -575,6 +737,13 @@ function mergeStoredState(raw: string): StudyState {
       theme: saved.theme === "dark" ? "dark" : "light",
       draft: normalizeDraft(saved.draft),
       srs: normalizeSrs(saved.srs),
+      collapsed: isRecord(saved.collapsed)
+        ? Object.fromEntries(
+            Object.entries(saved.collapsed).filter(
+              ([key, value]) => key in topicSections && typeof value === "boolean",
+            ),
+          ) as Record<string, boolean>
+        : {},
     };
   } catch {
     return fallback;
@@ -611,6 +780,7 @@ export default function Home() {
   const [mockChecks, setMockChecks] = useState<Record<string, boolean>>({});
   const [practiceCategory, setPracticeCategory] = useState<DesignCategory>("classic");
   const [referenceRevealed, setReferenceRevealed] = useState(false);
+  const [practiceStep, setPracticeStep] = useState(practiceSteps[0].id);
   const [quizAnswers, setQuizAnswers] = useState<Record<string, Record<number, number>>>({});
   const [recallRevealed, setRecallRevealed] = useState(false);
   const [recallScope, setRecallScope] = useState<"due" | "topic">("due");
@@ -669,6 +839,7 @@ export default function Home() {
     document.documentElement.dataset.theme = study.theme;
   }, [study.theme]);
 
+
   useEffect(() => {
     if (!hydrated) return;
     const timeout = window.setTimeout(() => {
@@ -716,6 +887,7 @@ export default function Home() {
   const activeDrill = estimationDrills[activeDrillIndex];
   const activePrompt = designPrompts.find((prompt) => prompt.id === study.draft.promptId) ?? designPrompts[0];
   const visiblePrompts = designPrompts.filter((prompt) => prompt.category === practiceCategory);
+  const activeStep = practiceSteps.find((step) => step.id === practiceStep) ?? practiceSteps[0];
   const unresolvedMistakes = study.mistakes.filter((mistake) => !mistake.resolved);
 
   /**
@@ -746,6 +918,32 @@ export default function Home() {
   const recallQueue = (recallScope === "topic" ? topicCards : dueCards)
     .filter((card) => !sessionSeen.includes(card.key));
   const activeCard = recallQueue[0];
+
+  // Spaced repetition is a keyboard workflow: space reveals, 1-4 grade. Bound
+  // only while the recall view is showing a card, and never while typing.
+  useEffect(() => {
+    if (view !== "recall" || !activeCard) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+
+      if (!recallRevealed && (event.key === " " || event.key === "Enter")) {
+        event.preventDefault();
+        setRecallRevealed(true);
+        return;
+      }
+      if (recallRevealed) {
+        const index = ["1", "2", "3", "4"].indexOf(event.key);
+        if (index !== -1) {
+          event.preventDefault();
+          gradeRecall(activeCard.key, gradeButtons[index].id);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, activeCard, recallRevealed]);
   const weakTopics = allTopics.filter((topic) => {
     const progress = study.topics[topic.id];
     return progress?.confidence <= 2 && progress.status !== "completed";
@@ -825,6 +1023,56 @@ export default function Home() {
     }));
     setRecallRevealed(false);
     setSessionSeen((current) => (current.includes(cardKey) ? current : [...current, cardKey]));
+  }
+
+  function isSectionOpen(id: TopicSectionId) {
+    return study.collapsed[id] === undefined ? topicSections[id].defaultOpen : !study.collapsed[id];
+  }
+
+  function toggleSection(id: TopicSectionId) {
+    setStudy((current) => ({
+      ...current,
+      collapsed: { ...current.collapsed, [id]: isSectionOpen(id) },
+    }));
+  }
+
+  /** Disclosure wrapper: header always visible, body folded away when closed. */
+  function Section({
+    id,
+    count,
+    note,
+    className = "",
+    children,
+  }: {
+    id: TopicSectionId;
+    count?: number;
+    note?: string;
+    className?: string;
+    children: React.ReactNode;
+  }) {
+    const open = isSectionOpen(id);
+    const meta = topicSections[id];
+    return (
+      <article className={`paper-panel topic-wide topic-section ${className}`.trim()} data-open={open}>
+        <button
+          className="section-toggle"
+          onClick={() => toggleSection(id)}
+          aria-expanded={open}
+          aria-controls={`section-${id}`}
+        >
+          <span className="section-toggle-copy">
+            <span className="eyebrow">{meta.eyebrow}</span>
+            <strong>{meta.title}</strong>
+          </span>
+          <span className="section-toggle-meta">
+            {typeof count === "number" ? <span className="section-count">{count}</span> : null}
+            {note ? <small>{note}</small> : null}
+            <span className="section-chevron" aria-hidden="true">{open ? "−" : "+"}</span>
+          </span>
+        </button>
+        {open ? <div className="section-body" id={`section-${id}`}>{children}</div> : null}
+      </article>
+    );
   }
 
   function startRecall(scope: "due" | "topic") {
@@ -1294,11 +1542,7 @@ export default function Home() {
             <ul className="tag-list large">{activeTopic.concepts.map((item) => <li key={item}>{item}</li>)}</ul>
           </article>
 
-          <article className="paper-panel topic-wide deep-dive-panel">
-            <div className="section-heading">
-              <div><p className="eyebrow">Mechanics</p><h2>What happens under the hood</h2></div>
-              <span className="section-note">Explain, don&apos;t name-drop</span>
-            </div>
+          <Section id="mechanics" count={activeTopic.deepDive.length} note="Explain, don't name-drop" className="deep-dive-panel">
             <div className="deep-dive-list">
               {activeTopic.deepDive.map((section, index) => (
                 <details key={section.title} open={index === 0}>
@@ -1308,10 +1552,9 @@ export default function Home() {
                 </details>
               ))}
             </div>
-          </article>
+          </Section>
 
-          <article className="paper-panel topic-wide">
-            <p className="eyebrow">Trade-offs to say aloud</p>
+          <Section id="tradeoffs" count={activeTopic.tradeoffs.length}>
             <div className="tradeoff-table">
               {activeTopic.tradeoffs.map((item) => (
                 <div key={item.decision}>
@@ -1322,10 +1565,9 @@ export default function Home() {
                 </div>
               ))}
             </div>
-          </article>
+          </Section>
 
-          <article className="paper-panel danger-paper topic-wide">
-            <p className="eyebrow">Failure diagnosis</p>
+          <Section id="failures" count={activeTopic.failureModes.length} className="danger-paper">
             <div className="failure-grid">
               {activeTopic.failureModes.map((item) => (
                 <div key={item.mode}>
@@ -1335,23 +1577,17 @@ export default function Home() {
                 </div>
               ))}
             </div>
-          </article>
+          </Section>
 
-          <article className="paper-panel topic-wide">
-            <div className="section-heading">
-              <div><p className="eyebrow">Active recall</p><h2>Questions an interviewer may push on</h2></div>
-            </div>
+          <Section id="questions" count={activeTopic.interviewQuestions.length}>
             <ol className="question-list">{activeTopic.interviewQuestions.map((item) => <li key={item}>{item}</li>)}</ol>
-          </article>
+          </Section>
 
-          <article className="paper-panel topic-wide decision-panel">
-            <div className="section-heading">
-              <div><p className="eyebrow">Decision discipline</p><h2>Before leaving this topic</h2></div>
-            </div>
+          <Section id="checklist" count={activeTopic.decisionChecklist.length} className="decision-panel">
             <ul className="decision-checklist">
               {activeTopic.decisionChecklist.map((item) => <li key={item}><span>✓</span>{item}</li>)}
             </ul>
-          </article>
+          </Section>
 
           <article className="paper-panel topic-wide recall-cta">
             <div>
@@ -1362,10 +1598,7 @@ export default function Home() {
             <button className="button primary" onClick={() => startRecall("topic")}>Drill this module</button>
           </article>
 
-          <article className="paper-panel topic-wide quiz-panel">
-            <div className="section-heading">
-              <div><p className="eyebrow">Knowledge check</p><h2>Commit before revealing the reasoning.</h2></div>
-            </div>
+          <Section id="quiz" count={activeTopic.quiz.length} className="quiz-panel">
             <div className="quiz-list">
               {activeTopic.quiz.map((question, questionIndex) => {
                 const selected = quizAnswers[activeTopic.id]?.[questionIndex];
@@ -1396,7 +1629,7 @@ export default function Home() {
                 );
               })}
             </div>
-          </article>
+          </Section>
 
           <article className="exercise-card topic-wide">
             <div><p className="eyebrow inverted">Component exercise</p><h2>{activeTopic.exercise}</h2></div>
@@ -1488,15 +1721,15 @@ export default function Home() {
               </div>
             ) : (
               <button className="button primary recall-reveal" onClick={() => setRecallRevealed(true)}>
-                Reveal answer
+                Reveal answer <kbd>space</kbd>
               </button>
             )}
 
             {recallRevealed ? (
               <div className="recall-grades">
-                {gradeButtons.map((button) => (
+                {gradeButtons.map((button, index) => (
                   <button key={button.id} className={`grade-${button.id}`} onClick={() => gradeRecall(activeCard.key, button.id)}>
-                    <strong>{button.label}</strong>
+                    <strong>{button.label}<kbd>{index + 1}</kbd></strong>
                     <small>{button.hint}</small>
                     <span>{describeNextInterval(study.srs[activeCard.key] ?? newSrsCard(localDateKey()), button.id)}</span>
                   </button>
@@ -1620,11 +1853,6 @@ export default function Home() {
             <p className="eyebrow">Timed design room</p>
             <h1 id="practice-title">{activePrompt.title}</h1>
           </div>
-          <div className="timer-cluster">
-            <span className="timer" aria-label={`${Math.ceil(secondsLeft / 60)} minutes remaining`}>{formatTimer(secondsLeft)}</span>
-            <button className="button primary" onClick={toggleTimer}>{study.draft.deadline ? "Pause" : secondsLeft === activePrompt.durationMinutes * 60 ? "Start timer" : "Resume"}</button>
-            <button className="button quiet" onClick={resetTimer}>Reset</button>
-          </div>
         </div>
 
         <div className="practice-category-tabs" aria-label="Design category">
@@ -1670,26 +1898,57 @@ export default function Home() {
           </div>
         </article>
 
-        <ol className="practice-phase-strip" aria-label="Interview phases">
-          {interviewPhases.map((phase, index) => (
-            <li key={phase.id}><span>0{index + 1}</span><strong>{phase.label}</strong><small>{phase.minutes}m</small></li>
-          ))}
-        </ol>
-
-        <div className="editor-grid">
-          {practiceFields.map((field) => (
-            <label className={`editor-field ${field.wide ? "wide" : ""}`} key={field.id}>
-              <span>{field.label}</span>
-              <textarea
-                value={study.draft.fields[field.id]}
-                onChange={(event) => updateDraftField(field.id, event.target.value)}
-                placeholder={field.prompt}
-                rows={field.wide ? 8 : 6}
-              />
-            </label>
-          ))}
+        <div className="practice-sticky">
+        <div className="practice-workbar">
+          <span className="workbar-title">{activePrompt.title}</span>
+          <div className="timer-cluster">
+            <span className="timer" aria-label={`${Math.ceil(secondsLeft / 60)} minutes remaining`}>{formatTimer(secondsLeft)}</span>
+            <button className="button primary" onClick={toggleTimer}>{study.draft.deadline ? "Pause" : secondsLeft === activePrompt.durationMinutes * 60 ? "Start timer" : "Resume"}</button>
+            <button className="button quiet" onClick={resetTimer}>Reset</button>
+          </div>
+        </div>
+        <nav className="practice-step-tabs" aria-label="Interview phases">
+          {practiceSteps.map((step, index) => {
+            const filled = step.fields.filter((field) => study.draft.fields[field].trim().length > 0).length;
+            return (
+              <button
+                key={step.id}
+                className={step.id === practiceStep ? "active" : ""}
+                onClick={() => setPracticeStep(step.id)}
+                aria-current={step.id === practiceStep ? "step" : undefined}
+              >
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{step.label}</strong>
+                <small>{step.minutes}{step.minutes === "after" ? "" : "m"}</small>
+                {step.fields.length > 0 ? (
+                  <i className={filled === step.fields.length ? "done" : filled > 0 ? "partial" : ""} aria-hidden="true" />
+                ) : null}
+              </button>
+            );
+          })}
+        </nav>
         </div>
 
+        {activeStep.fields.length > 0 ? (
+          <div className="editor-grid">
+            {activeStep.fields.map((fieldId) => {
+              const field = practiceFields.find((item) => item.id === fieldId)!;
+              return (
+                <label className={`editor-field ${activeStep.fields.length === 1 ? "wide" : ""}`} key={field.id}>
+                  <span>{field.label}</span>
+                  <textarea
+                    value={study.draft.fields[field.id]}
+                    onChange={(event) => updateDraftField(field.id, event.target.value)}
+                    placeholder={field.prompt}
+                    rows={activeStep.fields.length === 1 ? 10 : 8}
+                  />
+                </label>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {activeStep.kind === "sketch" ? (
         <article className="paper-panel sketch-panel">
           <div className="section-heading">
             <div>
@@ -1708,7 +1967,10 @@ export default function Home() {
             theme={study.theme}
           />
         </article>
+        ) : null}
 
+        {activeStep.kind === "reference" ? (
+        <>
         <section className="reference-gate" aria-labelledby="reference-heading">
           <div>
             <p className="eyebrow inverted">Calibration guide</p>
@@ -1755,6 +2017,14 @@ export default function Home() {
 
             <article className="reference-flow">
               <p className="eyebrow">End-to-end architecture</p>
+              <ul className="arch-legend" aria-label="Diagram legend">
+                <li><i className="lg-service" />Service</li>
+                <li><i className="lg-store" />Durable store</li>
+                <li><i className="lg-cache" />Cache</li>
+                <li><i className="lg-stream" />Stream / queue</li>
+                <li><i className="lg-async" />Off the request path</li>
+              </ul>
+              <ArchitectureFigure diagram={activePrompt.reference.diagram} id={activePrompt.id} />
               <ol>{activePrompt.reference.architecture.map((item, index) => <li key={item}><span>{String(index + 1).padStart(2, "0")}</span>{item}</li>)}</ol>
             </article>
 
@@ -1781,7 +2051,11 @@ export default function Home() {
             </div>
           </section>
         )}
+        </>
+        ) : null}
 
+        {activeStep.kind === "score" ? (
+        <>
         <section className="rubric-section" aria-labelledby="rubric-heading">
           <div className="section-heading">
             <div><p className="eyebrow">Self-evaluation</p><h2 id="rubric-heading">Score the attempt honestly.</h2></div>
@@ -1820,6 +2094,8 @@ export default function Home() {
           <div><p className="eyebrow inverted">Mistake log</p><h2 id="practice-mistake-heading">Capture only the three highest-leverage misses.</h2></div>
           {renderMistakeForm()}
         </section>
+        </>
+        ) : null}
 
         <div className="sticky-savebar">
           <p aria-live="polite">{saveNotice || "Draft changes are stored locally as you type."}</p>

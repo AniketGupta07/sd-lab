@@ -1860,3 +1860,268 @@ h2 {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* ── Reference architecture diagrams ────────────────────────────────── */
+
+.arch-figure {
+  margin: 0 0 22px;
+  padding: 18px 16px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--paper-strong);
+  overflow-x: auto;
+}
+
+.arch-figure svg {
+  display: block;
+  width: 100%;
+  min-width: 620px;
+  height: auto;
+}
+
+.arch-figure figcaption {
+  margin-top: 10px;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.arch-node rect {
+  fill: var(--paper);
+  stroke: var(--rule-strong);
+  stroke-width: 1.5;
+}
+
+.arch-node text {
+  fill: var(--ink);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  dominant-baseline: middle;
+}
+
+/* Role encodes what the box is responsible for, so the shape of the system
+   is legible before any label is read. */
+.arch-node.kind-client rect { fill: var(--canvas-deep); stroke: var(--ink-faint); }
+.arch-node.kind-edge rect { fill: var(--canvas-deep); stroke: var(--ink-soft); stroke-dasharray: 4 3; }
+.arch-node.kind-service rect { fill: var(--indigo-wash); stroke: var(--indigo); }
+.arch-node.kind-store rect { fill: var(--teal-wash); stroke: var(--teal); }
+.arch-node.kind-cache rect { fill: var(--amber-wash); stroke: var(--amber); }
+.arch-node.kind-stream rect { fill: var(--paper); stroke: var(--indigo); stroke-dasharray: 5 3; }
+.arch-node.kind-compute rect { fill: var(--indigo-wash); stroke: var(--indigo-dark); stroke-width: 2; }
+.arch-node.kind-external rect { fill: var(--paper); stroke: var(--ink-faint); stroke-dasharray: 2 3; }
+
+.arch-edge {
+  fill: none;
+  stroke: var(--ink-soft);
+  stroke-width: 1.6;
+}
+
+.arch-edge.async {
+  stroke: var(--ink-faint);
+  stroke-dasharray: 5 4;
+}
+
+.arch-arrowhead { fill: var(--ink-soft); }
+.arch-arrowhead.async { fill: var(--ink-faint); }
+
+.arch-edge-label {
+  fill: var(--ink-faint);
+  font-family: var(--mono, var(--sans));
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  /* Halo in the panel colour so a label stays legible where it crosses an
+     edge or clips a box corner, without needing a background rect. */
+  stroke: var(--paper-strong);
+  stroke-width: 3.5;
+  paint-order: stroke fill;
+}
+
+.arch-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.arch-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+}
+
+.arch-legend i {
+  width: 15px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1.5px solid var(--rule-strong);
+  background: var(--paper);
+}
+
+.arch-legend .lg-service { background: var(--indigo-wash); border-color: var(--indigo); }
+.arch-legend .lg-store { background: var(--teal-wash); border-color: var(--teal); border-radius: 6px; }
+.arch-legend .lg-cache { background: var(--amber-wash); border-color: var(--amber); border-radius: 6px; }
+.arch-legend .lg-stream { border-color: var(--indigo); border-style: dashed; }
+.arch-legend .lg-async { border: 0; border-top: 2px dashed var(--ink-faint); height: 0; border-radius: 0; }
+
+/* ── Collapsible topic sections ─────────────────────────────────────── */
+
+.topic-section { padding: 0; overflow: hidden; }
+
+.section-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 18px clamp(16px, 2vw, 26px);
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-toggle:hover { background: var(--canvas); }
+.section-toggle-copy { display: grid; gap: 3px; }
+.section-toggle-copy strong { font-family: var(--serif); font-size: 1.3rem; font-weight: 600; }
+.section-toggle-meta { display: inline-flex; align-items: center; gap: 12px; }
+.section-toggle-meta small { color: var(--ink-faint); font-size: 0.82rem; }
+
+.section-count {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--canvas-deep);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.section-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  color: var(--ink-soft);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.topic-section[data-open="true"] .section-chevron { border-color: var(--indigo); color: var(--indigo); }
+.section-body { padding: 0 clamp(16px, 2vw, 26px) clamp(18px, 2vw, 26px); }
+.topic-section.danger-paper .section-toggle:hover { background: var(--danger-wash); }
+
+/* ── Design room step tabs ──────────────────────────────────────────── */
+
+.practice-step-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  padding: 4px 0 8px;
+  overflow-x: auto;
+}
+
+.practice-step-tabs button {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 2px 9px;
+  flex: 0 0 auto;
+  min-width: 132px;
+  padding: 11px 15px 13px;
+  border: 1px solid var(--rule);
+  border-radius: 11px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.practice-step-tabs button:hover { border-color: var(--rule-strong); }
+
+.practice-step-tabs button.active {
+  border-color: var(--indigo);
+  background: var(--indigo-wash);
+  color: var(--indigo-dark);
+}
+
+.practice-step-tabs button span { color: var(--ink-faint); font-family: var(--mono); font-size: 0.72rem; }
+.practice-step-tabs button strong { font-size: 0.94rem; }
+.practice-step-tabs button small { grid-column: 2; color: var(--ink-faint); font-size: 0.74rem; }
+
+.practice-step-tabs button i {
+  position: absolute;
+  top: 10px;
+  right: 11px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--rule-strong);
+}
+
+.practice-step-tabs button i.partial { background: var(--amber); border-color: var(--amber); }
+.practice-step-tabs button i.done { background: var(--teal); border-color: var(--teal); }
+
+/* Keep the clock and the step tabs on screen: they are the working header of a
+   timed attempt. Sticking the wrapper (rather than each child) means the two
+   stack correctly no matter how tall the title wraps. */
+.practice-sticky {
+  position: sticky;
+  top: 71px;
+  z-index: 6;
+  margin-bottom: 22px;
+  padding-top: 12px;
+  background: color-mix(in srgb, var(--canvas) 95%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.practice-workbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 12px;
+}
+
+.workbar-title {
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.practice-workbar .timer { min-width: 104px; font-size: 1.5rem; }
+.practice-workbar .button { padding: 8px 15px; font-size: 0.84rem; }
+
+.recall-grades kbd,
+.recall-reveal kbd {
+  margin-left: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 5px;
+  background: var(--paper);
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+@media (max-width: 760px) {
+  .practice-sticky { position: static; }
+  .section-toggle-meta small { display: none; }
+}

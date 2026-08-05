@@ -133,6 +133,52 @@ test("ships technically deep content for every week and interview track", async 
   assert.match(content, /fencing|fenced/i);
 });
 
+test("ships a reference architecture diagram for every design room", async () => {
+  const files = await Promise.all(contentPaths.map((name) => readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8")));
+  const content = files.join("\n");
+  const promptCount = content.match(/^\s+category: "(?:classic|ml|llm)",$/gm)?.length ?? 0;
+  const diagrams = Array.from(content.matchAll(
+    /diagram: \{\s*caption: "((?:[^"\\]|\\.)*)",\s*nodes: \[(.*?)\],\s*edges: \[(.*?)\],\s*\},/gs,
+  ));
+
+  assert.equal(diagrams.length, promptCount, "every design room needs a diagram");
+
+  for (const [, caption, nodesBlock, edgesBlock] of diagrams) {
+    const nodes = Array.from(nodesBlock.matchAll(
+      /\{ id: "([^"]+)", label: "([^"]+)", kind: "([^"]+)", col: (\d+), row: (\d+) \}/g,
+    ));
+    const edges = Array.from(edgesBlock.matchAll(/\{ from: "([^"]+)", to: "([^"]+)"([^}]*)\}/g));
+    const ids = new Set(nodes.map(([, id]) => id));
+    const label = caption.slice(0, 40);
+
+    assert.ok(nodes.length >= 6, `${label}: needs a real component set`);
+    assert.ok(edges.length >= 6, `${label}: needs the flow between components`);
+    assert.equal(ids.size, nodes.length, `${label}: node ids must be unique`);
+
+    // Overlapping cells would render two boxes on top of each other.
+    const cells = nodes.map(([, , , , col, row]) => `${col}:${row}`);
+    assert.equal(new Set(cells).size, cells.length, `${label}: overlapping nodes`);
+
+    for (const [, from, to] of edges) {
+      assert.ok(ids.has(from) && ids.has(to), `${label}: edge references a missing node`);
+    }
+    const connected = new Set(edges.flatMap(([, from, to]) => [from, to]));
+    for (const [, id] of nodes) {
+      assert.ok(connected.has(id), `${label}: node "${id}" is unconnected`);
+    }
+
+    // Edge labels sit in the 92px gap between columns; longer ones overlap a box.
+    for (const [, , extras] of edges) {
+      const edgeLabel = extras.match(/label: "([^"]+)"/)?.[1];
+      if (edgeLabel) assert.ok(edgeLabel.length <= 14, `${label}: edge label "${edgeLabel}" will overflow the column gap`);
+    }
+    // Node labels wrap to at most three lines of ~20 characters.
+    for (const [, , nodeLabel] of nodes) {
+      assert.ok(nodeLabel.length <= 60, `${label}: node label "${nodeLabel}" will not fit its box`);
+    }
+  }
+});
+
 test("schedules free-recall cards for every module", async () => {
   const files = await Promise.all(contentPaths.map((name) => readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8")));
   const content = files.join("\n");
@@ -215,6 +261,38 @@ test("keeps retrieval practice and the whiteboard honest", async () => {
   assert.match(page, /function SketchPad\(/);
   assert.match(page, /touch-action|setPointerCapture/, "drawing must work with pointer input");
   assert.match(page, /draft: \{ \.\.\.current\.draft, sketch \}/, "sketches must persist with the draft");
+
+  // Retrieval practice must be drivable from the keyboard: reaching for the
+  // mouse on every card is friction on the most repeated action in the app.
+  assert.match(page, /if \(view !== "recall" \|\| !activeCard\) return;/);
+  assert.match(page, /event\.key === " " \|\| event\.key === "Enter"/, "space must reveal");
+  assert.match(page, /\["1", "2", "3", "4"\]\.indexOf\(event\.key\)/, "1-4 must grade");
+  assert.match(page, /\["INPUT", "TEXTAREA", "SELECT"\]\.includes\(target\.tagName\)/, "shortcuts must not fire while typing");
+});
+
+test("folds long pages into sections and phases", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  // The topic page was one undifferentiated wall; sections give it a reading
+  // order and remember what the learner has folded away.
+  assert.match(page, /const topicSections = \{/);
+  assert.match(page, /defaultOpen: true/);
+  assert.match(page, /defaultOpen: false/);
+  assert.match(page, /collapsed: Record<string, boolean>/);
+  assert.match(page, /key in topicSections && typeof value === "boolean"/, "restored section state must be validated");
+  assert.match(page, /aria-expanded=\{open\}/, "disclosure state must be exposed to assistive tech");
+
+  // The design room is worked one phase at a time so a timed attempt is not a
+  // scroll hunt, and the clock stays pinned while it runs.
+  assert.match(page, /const practiceSteps: Array<\{/);
+  assert.match(page, /activeStep\.kind === "sketch"/);
+  assert.match(page, /activeStep\.kind === "reference"/);
+  assert.match(page, /activeStep\.kind === "score"/);
+  assert.match(page, /className="practice-sticky"/);
+
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.practice-sticky \{[^}]*position: sticky/s, "the work bar must stay on screen");
+  assert.match(css, /\.arch-edge-label \{[^}]*paint-order: stroke fill/s, "diagram labels need a halo to stay legible");
 });
 
 test("keeps personal information out of publishable source", async () => {
