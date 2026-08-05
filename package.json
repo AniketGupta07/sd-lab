@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "test": "npm run build && node --test tests/static-export.test.mjs",
-    "lint": "eslint . --ignore-pattern out --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern out --ignore-pattern .next --ignore-pattern dist"
   },
   "dependencies": {
     "next": "16.2.6",

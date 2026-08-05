@@ -1,0 +1,1731 @@
+import type { DesignPrompt, StudyTopic } from "./types";
+
+export const llmTopics: StudyTopic[] = [
+  {
+    id: "llm-inference-execution",
+    week: 7,
+    day: 1,
+    tier: 3,
+    title: "LLM inference execution: prefill, decode, and KV state",
+    eyebrow: "Week 7 · Day 1",
+    estimatedMinutes: 85,
+    summary:
+      "Trace one generation from tokenization through prefill and autoregressive decode, size its KV cache, and separate time to first token from inter-token latency.",
+    whyItMatters:
+      "Serving answers often collapse generation into one GPU call. Senior candidates expose the two execution regimes, the per-request state that limits concurrency, and the user-visible SLO each stage controls.",
+    objectives: [
+      "Distinguish prefill, decode, queue time, and streaming latency.",
+      "Estimate KV-cache bytes from layers, KV heads, head dimension, sequence length, precision, and concurrency.",
+      "Explain cancellation, output limits, and phase-aware scheduling.",
+    ],
+    concepts: ["TTFT", "inter-token latency", "prefill", "decode", "KV cache", "GQA/MQA", "streaming", "token budget"],
+    deepDive: [
+      {
+        title: "Two execution regimes, two latency objectives",
+        summary: "Prefill processes the prompt in parallel; decode advances each sequence one token at a time.",
+        points: [
+          "Time to first token includes queueing, tokenization, prompt prefill, first-token sampling, and stream or transport overhead. Long prompts increase prefill work and can make TTFT miss its SLO even when subsequent decode is healthy.",
+          "Decode repeatedly reads model weights and the accumulated KV state for a small amount of new work, so it is commonly memory-bandwidth sensitive. Inter-token latency measures the gaps users feel after streaming begins.",
+          "For N streamed output tokens, end-to-end latency is approximately TTFT + (N − 1) × mean inter-token latency, with queue and cadence tails modeled separately. Report TTFT, p50/p95 inter-token latency, tokens/s, completion length, and cancellation.",
+        ],
+      },
+      {
+        title: "KV cache is the concurrency budget",
+        summary: "Attention reuses prior keys and values instead of recomputing the entire prefix at every decode step.",
+        points: [
+          "A useful per-sequence estimate is 2 × layers × KV heads × head dimension × cached tokens × bytes per element. Grouped-query or multi-query attention reduces KV heads relative to query heads.",
+          "KV memory grows linearly with prompt plus generated tokens and with live sequences. Model weights may fit while a burst of long contexts still exhausts accelerator memory.",
+          "Track allocated and useful KV bytes, free blocks, prefix-sharing bytes, sequence-length buckets, and fragmentation. Admission must reserve for the allowed output, not only the prompt already received.",
+        ],
+      },
+      {
+        title: "A generation is a cancellable state machine",
+        summary: "The request moves through queued, prefilling, decoding, finished, cancelled, and failed states.",
+        points: [
+          "Persist request identity, tenant, model revision, token counts, sampling parameters, deadline, and stop reason so retries and usage attribution are explainable.",
+          "Client disconnects and deadline expiry must propagate to the scheduler and free KV blocks promptly; otherwise invisible generations consume the most expensive capacity.",
+          "Bound input tokens, maximum new tokens, wall-clock time, and tool-call rounds. Streaming should not weaken moderation, quota, or final usage accounting.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Colocate or disaggregate prefill and decode", preferA: "Colocate for simple scheduling and no KV transfer boundary.", preferB: "Disaggregate when prompt-heavy prefill and latency-sensitive decode need different fleets or independent scaling.", watch: "KV transfer bandwidth, routing affinity, extra failure states, and phase imbalance." },
+      { decision: "Keep KV on accelerator or offload/recompute", preferA: "Keep KV resident for predictable decode latency.", preferB: "Offload or recompute cold state when memory, not latency, is the binding constraint.", watch: "PCIe/network stalls and repeated prefill can cost more than the saved memory." },
+      { decision: "Stream immediately or buffer output", preferA: "Stream for interactive products where TTFT and visible progress matter.", preferB: "Buffer for short structured outputs that require whole-response validation.", watch: "Once unsafe or invalid text is streamed, it cannot be recalled." },
+    ],
+    failureModes: [
+      { mode: "Long prompts monopolize prefill", symptom: "TTFT spikes while decode inter-token latency and GPU memory remain normal.", mitigation: "Use prompt-length-aware queues, chunked prefill, per-tenant budgets, and separate prefill capacity when justified." },
+      { mode: "KV reservation underestimates output growth", symptom: "Requests are admitted successfully but later abort or evict as sequences grow.", mitigation: "Reserve against bounded maximum output, allocate blocks incrementally, and shed before the safety watermark." },
+      { mode: "Cancelled generations keep decoding", symptom: "Billed/generated tokens exceed delivered tokens and KV occupancy remains high after disconnects.", mitigation: "Propagate cancellation to scheduler iterations, reclaim state idempotently, and alert on orphan-token ratio." },
+    ],
+    interviewQuestions: [
+      "Which stage dominates TTFT for this workload?",
+      "How many bytes of KV state does one p95 request require?",
+      "What happens to a sequence when the client disconnects?",
+      "Which metric distinguishes slow prefill from slow decode?",
+    ],
+    decisionChecklist: [
+      "Define p50 and p99 TTFT, inter-token latency, and end-to-end SLOs.",
+      "State prompt and output length distributions, not only requests per second.",
+      "Calculate weight and KV memory separately.",
+      "Reserve bounded output growth at admission.",
+      "Propagate deadlines, stop conditions, and cancellation.",
+      "Attribute tokens and cost by tenant and model revision.",
+    ],
+    exercise:
+      "For a decoder with 48 layers, 8 KV heads, head dimension 128, BF16 KV, a 4,000-token average live sequence, and 200 concurrent sequences, estimate KV memory. Then define TTFT and inter-token SLO dashboards and the cancellation path.",
+    prerequisites: ["estimation", "networking"],
+    relatedDesigns: ["llm-large-scale-serving", "llm-multi-model-gateway"],
+    quiz: [
+      { prompt: "Which metric isolates the user's wait after the first streamed token?", options: ["TTFT", "Inter-token latency", "Prompt tokens per request", "Cache allocation rate"], answerIndex: 1, explanation: "Inter-token latency measures the cadence of emitted tokens after generation begins; TTFT ends at the first token." },
+      { prompt: "With all other dimensions fixed, what happens to KV-cache bytes when cached sequence length doubles?", options: ["They stay constant", "They grow by roughly 1.4×", "They double", "They quadruple"], answerIndex: 2, explanation: "KV state is stored per layer and cached token, so memory scales linearly with sequence length." },
+    ],
+    furtherReading: [{ label: "vLLM: Efficient Memory Management for LLM Serving", url: "https://arxiv.org/abs/2309.06180" }],
+  },
+  {
+    id: "llm-serving-capacity-admission",
+    week: 7,
+    day: 2,
+    tier: 3,
+    title: "Continuous batching, paged attention, and admission",
+    eyebrow: "Week 7 · Day 2",
+    estimatedMinutes: 90,
+    summary:
+      "Turn heterogeneous token streams into a bounded scheduler that improves accelerator throughput without sacrificing tail latency, fairness, or KV-memory safety.",
+    whyItMatters:
+      "The useful capacity of an inference fleet is determined by the request mix and scheduler, not advertised peak FLOPS. A robust design treats tokens and KV blocks as first-class resources.",
+    objectives: [
+      "Compare static, dynamic, and iteration-level continuous batching.",
+      "Explain paged KV allocation, fragmentation, and prefix sharing.",
+      "Design token-weighted admission, fairness, and autoscaling signals.",
+    ],
+    concepts: ["continuous batching", "paged attention", "KV blocks", "chunked prefill", "admission control", "fair scheduling", "goodput", "headroom"],
+    deepDive: [
+      {
+        title: "Schedule at token-iteration granularity",
+        summary: "Continuous batching removes finished sequences and admits new work between decode iterations.",
+        points: [
+          "Static batches wait for the longest sequence; dynamic batches wait for a collection window; continuous batching lets arrivals join as slots free, increasing useful occupancy under variable output lengths.",
+          "The scheduler chooses a token budget across prefills and decodes. Large prefills improve throughput but can delay every active decoder, so chunk or cap prefill work per iteration.",
+          "Measure goodput: tokens completed while meeting TTFT and inter-token SLOs. Raw tokens/s can rise while user-visible tail latency becomes unacceptable.",
+        ],
+      },
+      {
+        title: "Page KV memory instead of reserving worst-case slabs",
+        summary: "Fixed-size logical blocks map to non-contiguous physical blocks as sequences grow.",
+        points: [
+          "Paging reduces internal fragmentation from reserving each request's maximum context and enables fine-grained allocation and reclamation.",
+          "Reference-counted blocks support copy-on-write prefix sharing for exact token prefixes; mutable continuation blocks remain request-owned.",
+          "Block size trades metadata and scheduling overhead against wasted tail space. Monitor free-block watermarks and the largest allocatable run only if the implementation still needs contiguous regions.",
+        ],
+      },
+      {
+        title: "Admit by future work and failure headroom",
+        summary: "A request consumes prompt compute, decode steps, KV growth, queue time, and tenant budget.",
+        points: [
+          "Use prompt tokens, reserved output tokens, model class, deadline, and current KV blocks to estimate schedulable work. RPS alone treats a 50-token completion like a 50,000-token one.",
+          "Apply per-tenant concurrency and token-rate quotas plus global memory watermarks. Queue within a bounded deadline; reject early with retry guidance when no feasible placement exists.",
+          "Autoscale on queued token work, SLO miss risk, and free KV capacity, with warm pools because loading weights and compiling kernels can take far longer than request deadlines.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Larger batch or tighter latency", preferA: "Use larger token budgets when throughput and cost dominate.", preferB: "Cap batch and prefill work when interactive tail latency dominates.", watch: "GPU utilization can improve while deadline goodput falls." },
+      { decision: "FIFO or cost-aware fairness", preferA: "Use FIFO for similar requests and a simple fairness contract.", preferB: "Use weighted fair or deficit scheduling across tenants and length classes under skew.", watch: "Shortest-job priority can starve long contexts; pure FIFO causes head-of-line blocking." },
+      { decision: "Evict/offload or reject", preferA: "Evict or offload resumable low-priority work when recovery cost is bounded.", preferB: "Reject before allocation for strict interactive SLOs.", watch: "Recompute and transfer storms can worsen the overload being handled." },
+    ],
+    failureModes: [
+      { mode: "One giant prefill stalls decoders", symptom: "Inter-token p99 jumps whenever long prompts enter an otherwise healthy batch.", mitigation: "Chunk prefill, reserve decode budget each iteration, and isolate extreme context classes." },
+      { mode: "KV blocks hit a hard watermark", symptom: "Admission collapses or active sequences are killed while compute utilization is below target.", mitigation: "Reserve output growth, compact or page allocations, cap contexts, and shed before exhaustion." },
+      { mode: "Autoscaling reacts after queues exceed deadlines", symptom: "New replicas become ready only after a retry storm has amplified load.", mitigation: "Scale on leading token/KV signals, maintain warm capacity, and bound client retries with jitter." },
+    ],
+    interviewQuestions: [
+      "What unit does the scheduler allocate: requests, tokens, or KV blocks?",
+      "How do you keep long prompts from starving active decoders?",
+      "What is the admission decision during a zone loss?",
+      "Why can 95% GPU utilization still be a bad outcome?",
+    ],
+    decisionChecklist: [
+      "Benchmark the actual prompt/output distribution.",
+      "Define a per-iteration prefill and decode token budget.",
+      "Reserve KV capacity for bounded future output.",
+      "Set tenant quotas and a starvation policy.",
+      "Scale from queued token work and KV pressure.",
+      "Preserve zone-failure headroom and reject before collapse.",
+    ],
+    exercise:
+      "Design admission and scheduling for a fleet serving short chat turns, 32k-document summaries, and batch extraction. Specify queues, token budgets, KV watermarks, fairness, rejection, and scale-out triggers.",
+    prerequisites: ["llm-inference-execution", "estimation"],
+    relatedDesigns: ["llm-large-scale-serving", "llm-multi-model-gateway"],
+    quiz: [
+      { prompt: "Why can continuous batching outperform a static request batch?", options: ["It removes autoregression", "It replaces finished sequences between iterations instead of waiting for the longest request", "It stores no KV cache", "It guarantees identical output lengths"], answerIndex: 1, explanation: "Iteration-level replacement avoids idle slots caused by variable completion lengths." },
+      { prompt: "Which is the safest primary admission input for mixed-length inference?", options: ["Requests per second only", "GPU temperature only", "Prompt work plus reserved output/KV work and deadlines", "Number of API keys"], answerIndex: 2, explanation: "Length-aware future work captures the compute and memory spread hidden by request counts." },
+    ],
+    furtherReading: [{ label: "vLLM PagedAttention paper", url: "https://arxiv.org/abs/2309.06180" }],
+  },
+  {
+    id: "llm-inference-optimization-routing",
+    week: 7,
+    day: 3,
+    tier: 3,
+    title: "Inference parallelism, compression, caching, and routing",
+    eyebrow: "Week 7 · Day 3",
+    estimatedMinutes: 95,
+    summary:
+      "Fit and accelerate models with parallelism, quantization, speculative decoding, and prefix caching, then route requests without breaking quality or tenant boundaries.",
+    whyItMatters:
+      "Each optimization moves a bottleneck or changes output behavior. Interviewers expect a measurement-driven stack and a gateway that makes quality, cost, compatibility, and fallback explicit.",
+    objectives: [
+      "Select data, tensor, and pipeline parallel layouts for serving.",
+      "Explain quantization, speculative decoding, and exact-prefix caching limits.",
+      "Design policy-based model routing and graceful fallback.",
+    ],
+    concepts: ["tensor parallelism", "pipeline parallelism", "quantization", "AWQ/GPTQ", "speculative decoding", "prefix cache", "model routing", "fallback"],
+    deepDive: [
+      {
+        title: "Parallelize only across a fast enough boundary",
+        summary: "Replicas scale independent requests; tensor and pipeline parallelism split one model execution.",
+        points: [
+          "Data-parallel serving replicas avoid per-layer collectives and are preferred once one model replica fits. Route for locality while spreading queue pressure.",
+          "Tensor parallelism shards matrix operations and synchronizes within layers, making latency sensitive to high-bandwidth low-latency links and the slowest rank.",
+          "Pipeline parallelism partitions layer ranges but introduces stage imbalance, bubbles, and KV ownership. It is useful when model fit requires more devices and enough concurrent microbatches exist.",
+        ],
+      },
+      {
+        title: "Trade exact compute for verified or compressed work",
+        summary: "Quantization changes representation; speculation changes how candidate tokens are proposed and verified.",
+        points: [
+          "Weight-only post-training methods such as GPTQ and AWQ—the latter uses activation statistics to identify and protect salient weight channels—can reduce weight footprint and bandwidth, but quality and kernel speed depend on model, bit width, hardware, and workload.",
+          "A cheaper draft can propose several tokens and one target forward pass can score them. Exact acceptance/rejection plus residual resampling preserves the target distribution; approximate variants trade quality for speed and need separate evaluation. Speedup depends on accepted length and verification cost.",
+          "Benchmark exact serving kernels, context lengths, languages, structured-output adherence, and safety slices. A smaller representation that invokes slow dequantization may not improve goodput.",
+        ],
+      },
+      {
+        title: "Route with policy and cache identity",
+        summary: "The gateway resolves a request into a model revision, serving profile, region, and fallback contract.",
+        points: [
+          "Route on tenant policy, task capability, quality tier, context/tool needs, residency, current SLO risk, and budget. Persist the reason and chosen revision for audit and replay.",
+          "A prefix-cache identity covers every KV-affecting input and setting: exact token and position IDs, model weights/revision, adapters, attention/RoPE configuration, KV dtype/layout, multimodal encoder inputs, and an authorization namespace. Bind policy versions when they change tokens or sharing eligibility; semantic similarity is never an exact key.",
+          "Fallback may alter quality, context length, tool behavior, or data policy. Declare which errors permit fallback and return the actual model identity and usage rather than silently changing semantics.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "More tensor parallelism or more replicas", preferA: "Increase TP when a model cannot fit or one request needs lower latency on fast links.", preferB: "Add replicas when the model fits and aggregate throughput or fault isolation matters.", watch: "Collective latency and correlated rank failure can erase TP gains." },
+      { decision: "Aggressive quantization or quality margin", preferA: "Use lower precision after workload-specific quality and kernel benchmarks pass.", preferB: "Keep higher precision for sensitive tasks, weak kernels, or narrow quality margins.", watch: "Aggregate perplexity can hide tool, language, safety, and long-context regressions." },
+      { decision: "Dynamic routing or cache locality", preferA: "Route dynamically to protect SLO and budget across heterogeneous models.", preferB: "Use stable affinity when prefix/KV locality and warm weights dominate.", watch: "Rapid route changes can thrash caches and overload the apparent fallback." },
+    ],
+    failureModes: [
+      { mode: "One tensor-parallel rank becomes a straggler", symptom: "Every request on the replica shows collective stalls despite normal average GPU utilization.", mitigation: "Measure collective latency by rank, use topology-aware placement, health the group as one unit, and replace the full replica." },
+      { mode: "Prefix cache key omits policy or tenant scope", symptom: "A request reuses KV state produced under another prompt, adapter, or authorization context.", mitigation: "Version every semantic input in the key and default to tenant-private cache namespaces." },
+      { mode: "Fallback silently changes contract", symptom: "Tool calls, safety behavior, or structured schemas fail only during overload.", mitigation: "Define compatibility tiers, validate fallbacks continuously, expose chosen model, and fail closed for incompatible requests." },
+    ],
+    interviewQuestions: [
+      "Why not increase tensor parallel size indefinitely?",
+      "What determines speculative-decoding acceptance and speedup?",
+      "Which fields make two prefixes safe to share?",
+      "When must the gateway refuse rather than fall back?",
+    ],
+    decisionChecklist: [
+      "Prefer independent replicas once the model fits.",
+      "Place collective groups inside the required network topology.",
+      "Benchmark quantization by task slice and real kernel.",
+      "Measure draft acceptance and target verification cost.",
+      "Version prefix-cache identity and sharing scope.",
+      "Make routing reasons and fallback semantics observable.",
+    ],
+    exercise:
+      "Choose a serving layout for a model that barely fits on four accelerators and serves three tenant tiers. Add quantization, speculative decoding, prefix caching, routing, and fallback only where measured benefits exceed their new failure modes.",
+    prerequisites: ["llm-serving-capacity-admission"],
+    relatedDesigns: ["llm-multi-model-gateway", "llm-large-scale-serving"],
+    quiz: [
+      { prompt: "When is adding data-parallel serving replicas generally preferable to increasing tensor-parallel degree?", options: ["When one replica fits and independent-request throughput is the goal", "When no replica fits in memory", "When every token needs an extra collective", "When network bandwidth is zero"], answerIndex: 0, explanation: "Independent replicas avoid within-layer collectives and scale aggregate request throughput when each model copy fits." },
+      { prompt: "Which value is insufficient by itself as a prefix-cache key?", options: ["Exact token IDs and model revision", "Tokenizer and adapter revision", "A semantic-similarity score", "Tenant cache-sharing scope"], answerIndex: 2, explanation: "KV reuse requires an exact compatible computation prefix; semantic similarity does not produce identical hidden state." },
+    ],
+    furtherReading: [
+      { label: "Megatron-LM model parallelism", url: "https://arxiv.org/abs/1909.08053" },
+      { label: "Speculative decoding", url: "https://arxiv.org/abs/2211.17192" },
+    ],
+  },
+  {
+    id: "llm-distributed-training",
+    week: 7,
+    day: 4,
+    tier: 3,
+    title: "Distributed training topology, memory, and recovery",
+    eyebrow: "Week 7 · Day 4",
+    estimatedMinutes: 105,
+    summary:
+      "Compose data, tensor, pipeline, FSDP, and ZeRO parallelism around model fit, network topology, activation memory, and recoverable checkpoints.",
+    whyItMatters:
+      "Large training runs fail at collective and state-management boundaries. A senior design connects every shard to its communication, memory reduction, checkpoint ownership, and restart procedure.",
+    objectives: [
+      "Map DP, TP, PP, FSDP, and ZeRO stages to collectives and memory ownership.",
+      "Budget parameters, gradients, optimizer state, activations, and temporary buffers.",
+      "Design distributed checkpointing, straggler detection, and deterministic recovery.",
+    ],
+    concepts: ["DDP", "tensor parallelism", "pipeline parallelism", "FSDP", "ZeRO", "all-reduce", "all-gather", "reduce-scatter", "activation checkpointing", "distributed checkpoint"],
+    deepDive: [
+      {
+        title: "Parallelism defines communication",
+        summary: "Choose a multidimensional process mesh and state what each group exchanges.",
+        points: [
+          "DDP replicates model and optimizer state, computes different microbatches, and all-reduces gradients. It scales samples when a full training replica fits.",
+          "Tensor parallelism shards operators and invokes latency-sensitive collectives inside layers; pipeline parallelism assigns layer ranges and sends activations/gradients between stages, with bubbles controlled by microbatch schedule.",
+          "Compose TP within a high-bandwidth node, PP across nearby nodes when needed, and DP across replica groups. The product of dimensions equals world size and constrains checkpoint resharding.",
+        ],
+      },
+      {
+        title: "Shard state and recompute activations deliberately",
+        summary: "Training memory includes more than weight bytes.",
+        points: [
+          "Account for parameters, gradients, optimizer moments/master weights, activations, communication buckets, and allocator workspace. Mixed precision reduces some tensors but optimizer state can remain higher precision.",
+          "ZeRO stage 1 partitions optimizer state, stage 2 additionally partitions gradients, and stage 3 partitions parameters. FSDP-style execution all-gathers parameter shards for a unit and reduce-scatters gradients after backward.",
+          "Activation checkpointing stores selected boundaries and recomputes intermediate activations during backward; gradient accumulation raises effective batch size without storing all microbatch activations simultaneously.",
+        ],
+      },
+      {
+        title: "Checkpoint a globally meaningful training step",
+        summary: "Recovery needs a committed manifest, not a directory of unrelated rank files.",
+        points: [
+          "Persist model, optimizer, scheduler, scaler, RNG, data-loader cursor, tokenizer/config, code and data versions, and topology metadata under one checkpoint ID.",
+          "Ranks upload immutable shards and checksums; a coordinator publishes the manifest only after every required shard is durable. Incomplete checkpoints remain invisible and are garbage-collected later.",
+          "On restart, validate lineage and reshard if topology changes. Monitor per-rank step time, collective duration, input wait, hardware errors, loss, and gradient norms to separate stragglers from divergence.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Tensor or pipeline parallelism", preferA: "Use TP over fast links for lower per-stage memory and enough collective bandwidth.", preferB: "Use PP when layer partitions fit and cross-stage transfers are cheaper than per-layer collectives.", watch: "TP communication, PP bubbles, uneven layers, and failure-domain size." },
+      { decision: "Shard more state or communicate less", preferA: "Use FSDP/ZeRO-3 when full model state cannot fit per rank.", preferB: "Use DDP or lower ZeRO stages when memory fits and simpler communication is faster.", watch: "Frequent parameter all-gathers can move the bottleneck to the network." },
+      { decision: "Store activations or recompute", preferA: "Store when memory permits and step time matters.", preferB: "Checkpoint activations when model/sequence memory is the binding constraint.", watch: "Recomputation increases FLOPs and can extend the window between recoverable checkpoints." },
+    ],
+    failureModes: [
+      { mode: "Collective participants disagree", symptom: "A subset of ranks hangs in all-reduce/all-gather while others advance or time out.", mitigation: "Validate process-group membership and tensor shapes, fail the job coherently, capture per-rank traces, and restart from a committed checkpoint." },
+      { mode: "Numerical overflow or silent divergence", symptom: "Loss or gradient norms become non-finite or drift across replicas after a precision/config change.", mitigation: "Use BF16 where supported, scaling and finite checks where needed, deterministic canaries, and synchronized abort before corrupt checkpoint publication." },
+      { mode: "Checkpoint contains mixed steps", symptom: "Restart loads successfully but loss jumps because shards, optimizer, and data cursor disagree.", mitigation: "Write immutable step-scoped shards and publish one atomic manifest only after completeness and checksum validation." },
+    ],
+    interviewQuestions: [
+      "Which collective occurs in each parallel dimension?",
+      "What tensor dominates memory at the target sequence length?",
+      "How does pipeline microbatch count affect bubbles?",
+      "Can a checkpoint restart on a different world size?",
+    ],
+    decisionChecklist: [
+      "Estimate every training-state category and temporary buffer.",
+      "Map TP groups to the fastest network links.",
+      "State DP/TP/PP/FSDP dimensions and collectives.",
+      "Choose accumulation and activation-checkpoint boundaries.",
+      "Commit checkpoints through a complete manifest.",
+      "Test rank failure, restore, and topology resharding before scale-up.",
+    ],
+    exercise:
+      "Design a 3D parallel training run for a model that cannot fit on one accelerator. Draw DP, TP, and PP groups; name every collective; budget optimizer and activation memory; and specify checkpoint commit and restart after one node fails.",
+    prerequisites: ["estimation", "networking", "storage-and-indexing"],
+    relatedDesigns: ["llm-post-training-platform"],
+    quiz: [
+      { prompt: "Which collective pattern is characteristic of FSDP/ZeRO-3-style parameter sharding during execution?", options: ["Broadcast logs only", "All-gather parameter shards and reduce-scatter gradients", "No communication", "DNS round trips"], answerIndex: 1, explanation: "Ranks gather the parameter material needed for computation and return gradients to their owning shards with reduce-scatter-style communication." },
+      { prompt: "What makes a distributed checkpoint safe to advertise as recoverable?", options: ["Rank zero wrote a file", "At least half the ranks finished", "A manifest atomically names every validated shard and the complete training state", "The loss was decreasing"], answerIndex: 2, explanation: "The committed manifest is the visibility boundary that prevents a restart from mixing missing or inconsistent rank state." },
+    ],
+    furtherReading: [
+      { label: "ZeRO: Memory Optimizations Toward Training Trillion Parameter Models", url: "https://arxiv.org/abs/1910.02054" },
+      { label: "Megatron-LM at scale", url: "https://arxiv.org/abs/2104.04473" },
+    ],
+  },
+  {
+    id: "llm-enterprise-rag-systems",
+    week: 7,
+    day: 5,
+    tier: 3,
+    title: "Enterprise RAG: freshness, ACLs, retrieval, and evidence",
+    eyebrow: "Week 7 · Day 5",
+    estimatedMinutes: 105,
+    summary:
+      "Build a versioned ingestion and retrieval pipeline that finds useful evidence without crossing point-in-time authorization boundaries or serving deleted content.",
+    whyItMatters:
+      "Enterprise RAG is a data system with a generative last mile. Retrieval quality is irrelevant if stale permissions leak a document or citations cannot be traced to the version actually used.",
+    objectives: [
+      "Design idempotent parsing, chunking, embedding, indexing, update, and deletion flows.",
+      "Enforce point-in-time ACLs before content enters model context.",
+      "Evaluate retrieval, reranking, answer grounding, freshness, and citation correctness separately.",
+    ],
+    concepts: ["document version", "hybrid retrieval", "reranking", "ACL snapshot", "freshness watermark", "tombstone", "citation", "groundedness"],
+    deepDive: [
+      {
+        title: "Version the ingestion graph",
+        summary: "Every derived chunk and vector must trace to an immutable source version and transform configuration.",
+        points: [
+          "A connector emits tenant, source ID, document ID, source revision, observed timestamp, ACL revision, content hash, and delete state. Idempotency prevents retries from creating duplicate live versions.",
+          "Parsing, normalization, chunking, embedding, and indexing produce versioned artifacts. Publish an index manifest or active-version pointer only after required artifacts are durable.",
+          "Updates create a new document version; deletions publish tombstones to lexical, vector, cache, and citation stores. Track per-source high-water marks and delete lag as freshness SLOs.",
+        ],
+      },
+      {
+        title: "Authorize at retrieval time and fail closed",
+        summary: "The caller may see only chunks authorized by a current, explainable policy snapshot.",
+        points: [
+          "Resolve user identity, tenant, groups, document policy, and policy version at query time. Bind the query audit record to that point-in-time ACL decision.",
+          "Push tenant and permission filters into candidate generation or use an authorization-aware posting/index structure. Fetching global top-k then filtering can both leak metadata and destroy recall for authorized results.",
+          "Revalidate authorization before loading source text or issuing citations, especially when group membership changes faster than vector indexes. Unknown or stale policy state denies access rather than falling back to an unfiltered search.",
+        ],
+      },
+      {
+        title: "Separate retrieval quality from answer quality",
+        summary: "Hybrid candidates, reranking, context construction, and generation each need their own evidence.",
+        points: [
+          "Combine lexical retrieval for exact names and rare terms with vector retrieval for semantic matches; fuse ranks, apply metadata constraints, then rerank a bounded candidate set.",
+          "Construct context with chunk text, document/version identity, source offsets, and trust labels. The generator must cite only supplied evidence and abstain when evidence is insufficient.",
+          "Evaluate recall@k or nDCG against judged evidence, reranker lift, answer correctness, citation precision/coverage, groundedness, authorization violations, and freshness by source and query slice.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Small or large chunks", preferA: "Use smaller semantic chunks for precise retrieval and citations.", preferB: "Use larger or parent-expanded chunks when answers need surrounding context.", watch: "Tiny chunks lose meaning; large chunks dilute retrieval and consume context tokens." },
+      { decision: "Pre-filter or post-filter authorization", preferA: "Pre-filter when permissions can be represented in the candidate index and leakage is unacceptable.", preferB: "Post-filter only as a defense-in-depth recheck on already authorized candidates.", watch: "Global retrieval followed by filtering can leak scores/metadata and return too few authorized results." },
+      { decision: "Synchronous or asynchronous freshness", preferA: "Synchronously gate high-risk deletes and revocations before acknowledging them.", preferB: "Use asynchronous indexing for ordinary updates with an explicit bounded-lag SLO.", watch: "A single freshness number hides source-specific stalls and tombstone lag." },
+    ],
+    failureModes: [
+      { mode: "ACL revocation reaches search late", symptom: "A user can retrieve a document after access was removed at the source.", mitigation: "Use revocation-first tombstones, current authorization recheck before fetch, point-in-time audit, and a fail-closed freshness threshold." },
+      { mode: "Deleted versions remain in one derived store", symptom: "Old chunks appear through cache, vector search, or citations after source deletion.", mitigation: "Fan out versioned tombstones, track acknowledgments per derived store, and continuously probe deletion completeness." },
+      { mode: "Generator sounds correct without evidence", symptom: "Answer quality aggregate looks high while citations are missing, mismatched, or unsupported.", mitigation: "Score evidence recall and citation entailment separately, require source offsets, and abstain below an evidence threshold." },
+    ],
+    interviewQuestions: [
+      "At what exact time is access decided and recorded?",
+      "How does a permission revocation outrun a stale vector index?",
+      "How do updates and deletes invalidate caches and citations?",
+      "Which metric tells you the answer failed because retrieval missed evidence?",
+    ],
+    decisionChecklist: [
+      "Assign immutable source and derived-artifact versions.",
+      "Make connector retries and reprocessing idempotent.",
+      "Propagate update and delete watermarks to every store.",
+      "Filter candidates by tenant and point-in-time authorization.",
+      "Carry document version and offsets into citations.",
+      "Evaluate retrieval, generation, ACL, and freshness independently.",
+    ],
+    exercise:
+      "Design ingestion and question answering for enterprise drives with nested groups, document moves, revocations, and deletes. Specify version records, hybrid search, reranking, point-in-time ACL checks, citations, and a freshness/evaluation dashboard.",
+    prerequisites: ["ml-retrieval-ranking", "consistency-idempotency", "classic-search-crawler-indexing"],
+    relatedDesigns: ["llm-enterprise-rag", "llm-generative-evaluation"],
+    quiz: [
+      { prompt: "Why is retrieving global top-k and then applying ACL filters unsafe as the primary design?", options: ["Vector search cannot use metadata", "It can leak candidate information and leave too few authorized results", "It always increases recall", "It removes the need for reranking"], answerIndex: 1, explanation: "Authorization belongs in candidate generation; a post-filter is useful only as a final recheck." },
+      { prompt: "Which identifier must a citation retain for reproducibility?", options: ["Only the document title", "The immutable document version and source offsets used in context", "Only the current URL", "The GPU worker ID"], answerIndex: 1, explanation: "Titles and live URLs can change; version plus offsets identifies the evidence actually presented to the model." },
+    ],
+    furtherReading: [{ label: "Retrieval-Augmented Generation", url: "https://arxiv.org/abs/2005.11401" }],
+  },
+  {
+    id: "llm-post-training",
+    week: 7,
+    day: 6,
+    tier: 3,
+    title: "Post-training: SFT, preferences, rollouts, and lineage",
+    eyebrow: "Week 7 · Day 6",
+    estimatedMinutes: 105,
+    summary:
+      "Operate supervised fine-tuning and preference optimization as reproducible campaigns with immutable data lineage, scalable rollouts, evaluation gates, and reversible releases.",
+    whyItMatters:
+      "Post-training couples data operations, model serving, distributed training, and subjective evaluation. Without explicit lineage and gates, a promising checkpoint cannot be reproduced or safely promoted.",
+    objectives: [
+      "Build versioned SFT and preference datasets with provenance and contamination controls.",
+      "Compare DPO with reward-model and RLHF-style rollout pipelines.",
+      "Track policy, reference, reward, prompt, code, and evaluation lineage through promotion and rollback.",
+    ],
+    concepts: ["SFT", "preference pair", "reward model", "DPO", "RLHF", "rollout worker", "reference policy", "KL constraint", "checkpoint lineage", "evaluation gate"],
+    deepDive: [
+      {
+        title: "Treat training data as a governed release",
+        summary: "SFT examples and preference pairs need immutable membership, provenance, and transform versions.",
+        points: [
+          "Normalize conversation templates, tool schemas, roles, stop tokens, weights, and truncation rules under a dataset manifest. Hash source and transformed records for dedupe and audit.",
+          "Preserve consent/license, collection policy, annotator pool, language/domain, safety labels, and PII-redaction state. Split by source or task family to reduce leakage into evaluation.",
+          "Run quality and contamination gates before training: exact/near duplicate detection, invalid role order, answer leakage, benchmark overlap, disagreement, and slice coverage.",
+        ],
+      },
+      {
+        title: "Choose an optimization loop by feedback and control needs",
+        summary: "DPO consumes offline preference pairs; RLHF-style training closes an online rollout and reward loop.",
+        points: [
+          "DPO optimizes chosen versus rejected responses relative to a reference policy without a separately served reward model or on-policy rollout loop, simplifying operations but inheriting the coverage and bias of the fixed preference data.",
+          "RLHF-style systems snapshot a policy, generate distributed rollouts, score them with reward and rule signals, estimate advantages, update the policy, and constrain drift from a reference. GRPO-style variants still require careful rollout grouping, reward normalization, and version pinning.",
+          "Rollout records bind prompt, policy checkpoint, tokenizer, sampling config, tool/environment version, reward-model versions, raw rewards, and termination. Stale or mixed versions invalidate learning assumptions.",
+        ],
+      },
+      {
+        title: "Promote through lineage-aware gates",
+        summary: "A campaign is a DAG from source data and code to a releasable serving bundle.",
+        points: [
+          "The lineage manifest links base model, SFT checkpoint, preference dataset, reward/reference models, optimizer config, rollout shards, code image, and every child checkpoint.",
+          "Evaluate fixed capability and safety suites, slice regressions, judge/human preferences, reward hacking probes, and serving cost before a checkpoint canary. Gate on confidence intervals and hard safety thresholds.",
+          "Retain known-good release bundles and data compatibility. Rollback changes routing to an earlier bundle; it does not mutate or relabel historical checkpoints.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "DPO or online RLHF-style optimization", preferA: "Use DPO for a strong offline pair dataset and a simpler stable training path.", preferB: "Use rollouts plus a reward signal when exploration and iterative policy distribution matter.", watch: "Offline coverage limits DPO; reward hacking and rollout cost complicate RL." },
+      { decision: "Fresh rollouts or reuse", preferA: "Generate on-policy or tightly versioned rollouts when the algorithm assumes the current policy.", preferB: "Reuse compatible offline data to reduce cost when importance/algorithm assumptions permit.", watch: "Stale-policy data can bias updates and conceal regressions." },
+      { decision: "Frequent or sparse checkpoints", preferA: "Checkpoint often when failures are costly and storage/coordination are manageable.", preferB: "Checkpoint less often when write stalls dominate and steps are cheap to replay.", watch: "Recovery-point cost, manifest overhead, and retention growth." },
+    ],
+    failureModes: [
+      { mode: "Reward hacking", symptom: "Training reward rises while blinded human preference, factuality, or safety falls.", mitigation: "Use held-out adversarial probes, multiple reward channels, reward-model version audits, KL/drift controls, and human gates." },
+      { mode: "Rollouts mix incompatible versions", symptom: "Updates become unstable and results cannot be reproduced from campaign records.", mitigation: "Pin policy, tokenizer, prompt, tool environment, and reward revisions in every rollout shard; reject mixed manifests." },
+      { mode: "A promoted checkpoint has incomplete lineage", symptom: "The team cannot identify its exact data, code, reference model, or evaluation suite during rollback.", mitigation: "Make a complete signed lineage manifest a hard registry and deployment prerequisite." },
+    ],
+    interviewQuestions: [
+      "What operational component does DPO remove compared with reward-model RL?",
+      "Which versions must every rollout carry?",
+      "How do you detect reward hacking outside the optimized score?",
+      "What exactly is rolled back after a regression?",
+    ],
+    decisionChecklist: [
+      "Version source, transforms, template, tokenizer, and split membership.",
+      "Audit provenance, PII, duplicates, contamination, and slice coverage.",
+      "Pin policy/reference/reward/tool versions per rollout.",
+      "Commit distributed checkpoints through immutable manifests.",
+      "Gate capability, safety, preference, and serving regressions.",
+      "Keep a compatible known-good serving bundle ready for rollback.",
+    ],
+    exercise:
+      "Design one campaign that runs SFT, collects pairwise preferences, compares DPO with a rollout-based variant, and promotes a checkpoint. Include data manifests, rollout records, reward versions, distributed checkpoints, evaluation gates, and rollback.",
+    prerequisites: ["llm-distributed-training", "ml-training-evaluation-registry"],
+    relatedDesigns: ["llm-post-training-platform", "llm-preference-arena"],
+    quiz: [
+      { prompt: "What does DPO avoid relative to a conventional reward-model plus online RLHF pipeline?", options: ["Any preference data", "A separately trained reward-model serving and on-policy RL rollout loop", "A reference policy", "Evaluation gates"], answerIndex: 1, explanation: "DPO learns directly from chosen/rejected pairs under its objective, removing the separate reward-and-online-RL operational loop." },
+      { prompt: "Which rollout record is reproducible?", options: ["Prompt text only", "Policy name and final reward only", "Prompt plus pinned policy, tokenizer, sampling, tool environment, reward versions, and outputs", "GPU hostname only"], answerIndex: 2, explanation: "Reproduction requires every semantic input and scoring version, not just the prompt or a mutable model name." },
+    ],
+    furtherReading: [
+      { label: "Training language models to follow instructions with human feedback", url: "https://arxiv.org/abs/2203.02155" },
+      { label: "Direct Preference Optimization", url: "https://arxiv.org/abs/2305.18290" },
+    ],
+  },
+  {
+    id: "llm-evaluation-safety-operations",
+    week: 7,
+    day: 7,
+    tier: 3,
+    title: "LLM evaluation, safety boundaries, and cost operations",
+    eyebrow: "Week 7 · Day 7",
+    estimatedMinutes: 105,
+    summary:
+      "Calibrate automated evaluation against blinded humans, isolate untrusted prompts and tools, and operate per-tenant safety, observability, and cost controls.",
+    whyItMatters:
+      "Generative quality is open-ended and the model often sits between private data and powerful tools. Evaluation bias and confused trust boundaries can turn a high-scoring release into a security or cost incident.",
+    objectives: [
+      "Combine fixed, task-specific, pairwise, human, and judge-based evaluation.",
+      "Calibrate LLM judges for agreement, position, verbosity, and prompt sensitivity.",
+      "Draw trust boundaries for tenants, retrieved text, tool calls, logs, and budgets.",
+    ],
+    concepts: ["LLM-as-judge", "judge calibration", "pairwise preference", "prompt injection", "capability token", "sandbox", "tenant isolation", "cost attribution", "abuse control"],
+    deepDive: [
+      {
+        title: "Use an evaluation portfolio with uncertainty",
+        summary: "No single metric establishes capability, preference, safety, and product value.",
+        points: [
+          "Version prompts, rubrics, datasets, sampling, candidate outputs, model revisions, and evaluator revisions. Preserve raw artifacts so a score can be recomputed.",
+          "Use deterministic checks for structured or factual tasks, pairwise human judgments for open-ended preference, and targeted red-team suites for rare harms. Report slices and confidence intervals, not only one average.",
+          "Prevent benchmark contamination with access controls and rotating holdouts; distinguish release gating sets from public development sets and live sampled audits.",
+        ],
+      },
+      {
+        title: "Calibrate judges instead of trusting fluent scores",
+        summary: "An LLM judge is a fallible measurement instrument whose version and prompt are part of the metric.",
+        points: [
+          "Compare judge decisions with blinded expert labels on representative slices; report agreement, confusion, rank correlation, calibration, and uncertainty.",
+          "Randomize candidate order and repeat swapped-position trials; probe verbosity, style, self-preference, reference leakage, rubric paraphrase, and adversarial instruction sensitivity.",
+          "Route low-confidence, high-impact, or judge-disagreement cases to humans. A judge update creates a new metric version and requires backfill before longitudinal comparison.",
+        ],
+      },
+      {
+        title: "Treat model text as untrusted across every tool boundary",
+        summary: "System policy, user input, retrieved content, model output, and tool results occupy different trust zones.",
+        points: [
+          "Prompt injection inside a document is data, not authority. The orchestrator—not the model—enforces allowlisted tools, schema validation, tenant-scoped capability tokens, confirmation for consequential actions, and deny-by-default egress.",
+          "Run code and parsers in resource-limited sandboxes with isolated filesystems and networks. Reauthorize each tool call against the current user and never place broad credentials in model-visible context.",
+          "Redact or tokenize sensitive logs, segregate tenant caches and traces, set retention/access policy, and attribute input, cached, output, tool, and retry cost by tenant, model, and feature.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Automated judge or human review", preferA: "Use calibrated judges for high-volume iteration and triage.", preferB: "Use blinded domain humans for consequential, ambiguous, or calibration samples.", watch: "Judge drift, correlated model bias, human inconsistency, latency, and cost." },
+      { decision: "Rich logging or data minimization", preferA: "Log enough versioned evidence for debugging, abuse, and billing with strict access.", preferB: "Minimize or redact content when privacy and retention risk dominate.", watch: "Prompts, retrieved documents, tool results, and traces can all contain secrets." },
+      { decision: "Powerful agent tools or narrow capabilities", preferA: "Grant narrow per-task tokens and human confirmation for consequential actions.", preferB: "Offer broader autonomous tools only inside strongly isolated, reversible environments.", watch: "Prompt injection converts ambient authority into an exfiltration path." },
+    ],
+    failureModes: [
+      { mode: "Judge rewards position or verbosity", symptom: "Model ranking flips when answer order swaps or concise answers are expanded without new facts.", mitigation: "Blind identities, randomize and swap order, calibrate on human gold, and report bias probes per judge version." },
+      { mode: "Retrieved prompt injection reaches a privileged tool", symptom: "A document causes unexpected network access, secret reads, or external actions.", mitigation: "Keep instructions and data in separate trust channels, enforce capabilities outside the model, sandbox tools, and require confirmation." },
+      { mode: "Cross-tenant traces or caches leak content", symptom: "One tenant observes another tenant's prompt, prefix, document, or tool result.", mitigation: "Namespace every stateful layer by tenant and policy version, encrypt and restrict logs, and continuously test isolation." },
+    ],
+    interviewQuestions: [
+      "How will you know an LLM judge agrees with the target human population?",
+      "What changes when the judge model or rubric changes?",
+      "Which component—not the model—authorizes a tool call?",
+      "How is the cost of retries, cache hits, and tool loops charged?",
+    ],
+    decisionChecklist: [
+      "Version every test, candidate output, rubric, and evaluator.",
+      "Calibrate judges against blinded humans and bias probes.",
+      "Separate policy instructions from untrusted retrieved/tool text.",
+      "Issue least-privilege tenant-scoped tool capabilities.",
+      "Sandbox execution and deny network/filesystem access by default.",
+      "Redact logs and attribute full request cost by tenant and feature.",
+    ],
+    exercise:
+      "Design release evaluation and runtime safety for a tool-using enterprise assistant. Include judge calibration, blinded human sampling, injection boundaries, tenant-scoped tool tokens, sandboxing, redacted logs, quotas, and cost attribution.",
+    prerequisites: ["llm-enterprise-rag-systems", "llm-post-training"],
+    relatedDesigns: ["llm-generative-evaluation", "llm-preference-arena", "llm-multi-model-gateway"],
+    quiz: [
+      { prompt: "What is the correct security interpretation of instructions found inside a retrieved document?", options: ["They override the system prompt", "They are untrusted data and cannot grant tool authority", "They are safe if the document is long", "They bypass tenant authorization"], answerIndex: 1, explanation: "Only the orchestrator's trusted policy may grant capabilities; retrieved content remains untrusted input." },
+      { prompt: "A judge ranking reverses when answer A and B swap positions. What does that demonstrate?", options: ["Perfect calibration", "A position-bias failure that must be measured and mitigated", "The candidates are identical", "Human review is unnecessary"], answerIndex: 1, explanation: "An irrelevant order change should not reverse a stable preference; swap tests expose position bias." },
+    ],
+    furtherReading: [
+      { label: "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena", url: "https://arxiv.org/abs/2306.05685" },
+      { label: "HELM: Holistic Evaluation of Language Models", url: "https://arxiv.org/abs/2211.09110" },
+    ],
+  },
+  {
+    id: "mock-timed-orchestration",
+    week: 8,
+    day: 1,
+    tier: 3,
+    title: "Orchestrate a 45-minute senior design interview",
+    eyebrow: "Week 8 · Day 1",
+    estimatedMinutes: 70,
+    summary:
+      "Run one visible clock, maintain an assumption ledger, and move from requirements to estimates, interfaces, architecture, deep dive, reliability, and a concise close.",
+    whyItMatters:
+      "Strong technical knowledge can still produce a weak interview if the candidate explores silently, over-invests in one branch, or never lands the design. Orchestration makes judgment observable.",
+    objectives: [
+      "Use explicit time boxes while adapting to interviewer signals.",
+      "Convert ambiguity into prioritized requirements and reversible assumptions.",
+      "Narrate transitions, park low-value branches, and finish with risks and validation.",
+    ],
+    concepts: ["time box", "assumption ledger", "parking lot", "deep-dive contract", "interviewer checkpoint", "executive close"],
+    deepDive: [
+      {
+        title: "Allocate the clock before drawing boxes",
+        summary: "A default schedule prevents accidental depth from consuming the interview.",
+        points: [
+          "Use roughly minutes 0–5 for users, scope, SLOs, and invariants; 5–10 for scale; 10–15 for APIs and data; 15–25 for the end-to-end path; 25–37 for one or two deep dives; 37–43 for failure and trade-offs; and 43–45 for the close.",
+          "Write remaining time and unresolved high-risk assumptions where both parties can see them. Compress lower-value sections when the interviewer redirects; do not silently abandon the final synthesis.",
+          "At each transition, summarize the decision and ask whether to deepen or continue. This is collaboration, not permission-seeking after every sentence.",
+        ],
+      },
+      {
+        title: "Maintain a decision ledger",
+        summary: "Separate confirmed requirements, assumptions, decisions, open risks, and parked topics.",
+        points: [
+          "Prioritize three or four functional flows and measurable nonfunctional goals. Mark out-of-scope items explicitly so omissions look intentional.",
+          "Attach each estimate to a decision: partition count, cache working set, accelerator fleet, bandwidth, or regional topology. Keep one sensitivity assumption if it could change the architecture.",
+          "When corrected, update the ledger and downstream choice aloud. Defending a stale assumption is worse than revising the design coherently.",
+        ],
+      },
+      {
+        title: "Control depth and recover from stalls",
+        summary: "Deep dive where risk and differentiation are highest, then return to the whole system.",
+        points: [
+          "Offer a menu of two deep dives tied to requirements—such as consistency versus overload—and let the interviewer select when signals are ambiguous.",
+          "If stuck, restate the invariant, draw the request path, name the current bottleneck, and compare two viable choices. This produces evidence even without a perfect answer.",
+          "Reserve the close: restate scale and SLOs, the critical path, one major trade-off, top failure risks, and the first measurement or experiment you would run.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Broad coverage or deep specialization", preferA: "Cover the complete critical path before deep diving.", preferB: "Spend remaining time on the highest-risk or interviewer-selected subsystem.", watch: "A brilliant isolated component does not prove an end-to-end design." },
+      { decision: "Ask or assume", preferA: "Ask when the answer changes invariants, scale, or architecture.", preferB: "State a reversible assumption when detail is low-impact or time is short.", watch: "Question lists without prioritization consume the clock and signal weak judgment." },
+      { decision: "Polished plan or live correction", preferA: "Use a stable framework to communicate clearly.", preferB: "Revise openly when new constraints invalidate a choice.", watch: "Hiding corrections creates contradictions across APIs, data, and reliability." },
+    ],
+    failureModes: [
+      { mode: "Requirements consume the first half", symptom: "No complete architecture exists when twenty minutes remain.", mitigation: "Cap clarification at architecture-changing questions, state defaults, and move on with an assumption ledger." },
+      { mode: "Component rabbit hole", symptom: "The candidate explains one database or algorithm but omits APIs, failure paths, or operations.", mitigation: "Set a deep-dive end time and explicitly return to the end-to-end path and reliability." },
+      { mode: "Interview ends without synthesis", symptom: "Correct pieces feel disconnected and key trade-offs remain implicit.", mitigation: "Protect the final two minutes and deliver a scale, path, trade-off, risk, and validation close." },
+    ],
+    interviewQuestions: [
+      "Which three questions can actually change this architecture?",
+      "What decision did the last estimate drive?",
+      "Where should the interview go deeper and why?",
+      "Can you close the design in ninety seconds?",
+    ],
+    decisionChecklist: [
+      "Write a seven-phase clock and protect the close.",
+      "Prioritize functional flows, SLOs, and invariants.",
+      "Keep confirmed facts distinct from assumptions.",
+      "Connect every material estimate to architecture.",
+      "Offer risk-based deep-dive choices.",
+      "End with trade-offs, risks, and next validation.",
+    ],
+    exercise:
+      "Record a 45-minute spoken design. At minutes 5, 10, 15, 25, 37, and 43, capture the artifact that should exist. Replay only the transitions and final ninety-second close until they are crisp.",
+    prerequisites: ["estimation", "llm-evaluation-safety-operations"],
+    relatedDesigns: ["classic-payment-ledger", "ml-personalized-feed", "llm-large-scale-serving"],
+    quiz: [
+      { prompt: "Which estimate belongs in a senior interview answer?", options: ["Every number you can calculate", "Only an estimate tied to a capacity, partitioning, cost, or SLO decision", "No estimate unless exact", "Daily active users without units"], answerIndex: 1, explanation: "An estimate earns time when it changes the design or defines a critical uncertainty." },
+      { prompt: "What is the best response when a new constraint invalidates an earlier assumption?", options: ["Ignore it", "Restart silently", "Update the assumption ledger and explain the downstream design change", "Argue that the prompt is wrong"], answerIndex: 2, explanation: "Visible correction demonstrates coherent reasoning and collaboration." },
+    ],
+  },
+  {
+    id: "mock-classic-synthesis",
+    week: 8,
+    day: 2,
+    tier: 3,
+    title: "Classic systems mock synthesis",
+    eyebrow: "Week 8 · Day 2",
+    estimatedMinutes: 80,
+    summary:
+      "Integrate consistency, partitioning, asynchronous work, and regional failure into two timed classic-system mocks without reaching for components before invariants.",
+    whyItMatters:
+      "Senior classic interviews test whether familiar building blocks become a coherent system under duplicate delivery, hot keys, partial failure, and data recovery.",
+    objectives: [
+      "State business invariants and consistency per operation.",
+      "Connect scale and access patterns to partition and index choices.",
+      "Walk through retries, backpressure, failover, and repair.",
+    ],
+    concepts: ["source of truth", "idempotency", "partition key", "outbox", "backpressure", "RPO/RTO", "reconciliation", "hot key"],
+    deepDive: [
+      {
+        title: "Begin with invariants and ownership",
+        summary: "The source of truth and serialization boundary follow the business rule.",
+        points: [
+          "For money or scarce inventory, write conservation and uniqueness invariants before selecting storage. For feeds or presence, define acceptable staleness and read-your-writes behavior.",
+          "Name the owner of each mutable entity and where conflicting writes serialize. Cross-partition workflows need sagas, reservations, or a deliberately colocated key.",
+          "Make externally retryable writes idempotent at the mutation boundary and publish downstream work through an outbox or equivalent atomic handoff.",
+        ],
+      },
+      {
+        title: "Make scale reshape the architecture",
+        summary: "Read/write ratios, skew, fan-out, retention, and payload size determine the design.",
+        points: [
+          "Use the access path to select hash, range, geo, or composite keys. Show how one hot celebrity, merchant, room, or tenant is isolated without global rebalancing.",
+          "Separate synchronous correctness work from asynchronous derived views. State lag contracts and how a user observes completion or retries safely.",
+          "Size caches and queues from working set and recovery rate, not steady-state hit rate or ingress alone. A backlog must drain faster than it grows after recovery.",
+        ],
+      },
+      {
+        title: "Narrate one failure to repair",
+        summary: "A senior answer follows data through ambiguity, failover, replay, and reconciliation.",
+        points: [
+          "Pick a timeout after commit, a lost worker, or a regional outage. Explain client behavior, dedupe identity, replica promotion, and whether reads can be stale.",
+          "Bound queues, retries, and concurrency so a dependency slowdown degrades intentionally rather than amplifying traffic.",
+          "Use checksums, audit logs, invariant scanners, and reconciliation jobs to detect latent divergence that request-path alerts miss.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Synchronous consistency or derived async view", preferA: "Synchronize the minimal correctness-critical mutation.", preferB: "Build feeds, search, analytics, and notifications asynchronously when lag is acceptable.", watch: "Dual writes and undefined user-visible completion semantics." },
+      { decision: "Fan-out on write or read", preferA: "Fan out on write for bounded recipient sets and fast reads.", preferB: "Fan out on read for extremely high-degree publishers or sparse readership.", watch: "Hybrid designs need deterministic merge, dedupe, and ranking." },
+      { decision: "Regional availability or strict global ordering", preferA: "Keep region-local ownership and accept bounded lag when availability dominates.", preferB: "Coordinate globally only for invariants requiring one order.", watch: "Cross-region latency, partitions, and an unclear conflict policy." },
+    ],
+    failureModes: [
+      { mode: "Component-first answer", symptom: "The design names databases and queues but cannot state what must never happen.", mitigation: "Restart from user flows, invariants, and consistency per operation; justify each component from them." },
+      { mode: "Average scale hides skew", symptom: "One key or tenant overloads a partition while fleet averages look safe.", mitigation: "Model the largest key, isolate it with subpartitioning or dedicated ownership, and enforce tenant admission." },
+      { mode: "Failover ignores ambiguous writes", symptom: "Clients duplicate effects or lose acknowledged data after leader or region transition.", mitigation: "Define commit acknowledgment, idempotency, epochs, RPO/RTO, replay, and reconciliation explicitly." },
+    ],
+    interviewQuestions: [
+      "What must never happen in this product?",
+      "Which key owns the write and what is the hottest possible key?",
+      "What does the client do after an ambiguous timeout?",
+      "How does the system prove recovery is complete?",
+    ],
+    decisionChecklist: [
+      "Write invariants and per-operation consistency.",
+      "Choose ownership and partition keys from access patterns.",
+      "Make retries and async consumers idempotent.",
+      "Model skew, queue drain, and one-zone loss.",
+      "Define RPO, RTO, replay, and repair.",
+      "Complete two spoken classic mocks and compare recurring misses.",
+    ],
+    exercise:
+      "Run two 45-minute mocks from different shapes, such as a payment ledger and a newsfeed. For each, preserve a one-page record of invariants, estimates, ownership, async boundaries, overload policy, and one failure-to-repair trace.",
+    prerequisites: ["mock-timed-orchestration", "consistency-idempotency", "replication-partitioning"],
+    relatedDesigns: ["classic-payment-ledger", "classic-newsfeed", "classic-chat"],
+    quiz: [
+      { prompt: "Where should idempotency be enforced for an at-least-once payment event?", options: ["Only in the client", "At the correctness-critical effect boundary using a stable business identity", "Only in the broker UI", "After analytics processing"], answerIndex: 1, explanation: "Delivery can repeat; the financial mutation must atomically deduplicate the logical effect." },
+      { prompt: "What proves a queue can recover after a traffic spike?", options: ["Ingress eventually becomes zero", "Consumer recovery throughput exceeds arrival rate with bounded retention and retries", "The queue is durable", "There are many topic names"], answerIndex: 1, explanation: "A durable backlog is useful only if consumers have enough headroom to drain it before retention or business deadlines expire." },
+    ],
+  },
+  {
+    id: "mock-ml-synthesis",
+    week: 8,
+    day: 3,
+    tier: 3,
+    title: "ML system mock synthesis",
+    eyebrow: "Week 8 · Day 3",
+    estimatedMinutes: 85,
+    summary:
+      "Practice two end-to-end ML interviews that connect a decision contract and point-in-time data to serving, experimentation, delayed outcomes, and retraining gates.",
+    whyItMatters:
+      "An ML mock is not a model-architecture recital. Senior signal comes from aligning labels, metrics, data lineage, policy, serving, feedback, and safe deployment.",
+    objectives: [
+      "Define decision time, eligible population, outcome horizon, and error costs.",
+      "Prevent leakage and training-serving skew with point-in-time lineage.",
+      "Connect offline gates, online experiments, monitoring, and rollback.",
+    ],
+    concepts: ["decision contract", "point-in-time join", "feature freshness", "calibration", "slice metric", "shadow", "canary", "feedback loop"],
+    deepDive: [
+      {
+        title: "Frame one deployable decision",
+        summary: "Model output, product policy, and eventual outcome are separate contracts.",
+        points: [
+          "Define entity, observation cutoff, prediction horizon, eligible population, score semantics, action, abstention, capacity, and fallback before discussing algorithms.",
+          "Translate false-positive and false-negative harm into an operating point or constrained ranking policy. Use a credible rules or simple-model baseline.",
+          "Select discrimination, ranking, calibration, utility, latency, and safety metrics at the actual policy threshold and consequential slices.",
+        ],
+      },
+      {
+        title: "Make every feature and label time-correct",
+        summary: "Training rows must reproduce what was knowable when the decision was made.",
+        points: [
+          "Use event time, availability time, feature definition version, source watermark, and point-in-time joins. A feature created later is leakage even if its event timestamp looks old.",
+          "Version label rules and handle censoring, delayed outcomes, review selection, and label correction. Split temporally and by entity when dependence would contaminate validation.",
+          "Serve through a compatible feature/model/policy bundle and monitor freshness, defaults, skew, score/actions, and outcome maturity by release and slice.",
+        ],
+      },
+      {
+        title: "Close the lifecycle loop safely",
+        summary: "Offline improvement becomes a release only after live execution and causal evidence.",
+        points: [
+          "Replay and load test, shadow without side effects, canary a stable cohort, then ramp through operational and product gates with bake time.",
+          "Log candidate sets, exposures, propensity, actions, overrides, and mature outcomes so policy-induced feedback is visible.",
+          "Treat drift as a diagnostic trigger. Validate data and labeled performance, train a candidate, pass temporal/slice gates, then deploy; do not auto-promote on distribution distance alone.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Fresh online features or robust cached features", preferA: "Use online features when marginal lift justifies latency and availability cost.", preferB: "Use cached/offline features and defaults for resilience and reproducibility.", watch: "Freshness mismatch, missing features, and correlated fallback." },
+      { decision: "Optimize model metric or policy utility", preferA: "Use model metrics to diagnose ranking and calibration.", preferB: "Choose launch and threshold from expected product utility and constraints.", watch: "AUC lift can be irrelevant at the feasible operating point." },
+      { decision: "Automatic retraining or gated promotion", preferA: "Automate candidate production for mature pipelines.", preferB: "Require labeled, slice, safety, and staged-deployment gates before promotion.", watch: "Data corruption and feedback loops can make fast automation amplify harm." },
+    ],
+    failureModes: [
+      { mode: "Future information leaks into training", symptom: "Offline performance collapses in shadow despite correct serving code.", mitigation: "Use availability-time point-in-time joins, temporal splits, and row-level lineage audits." },
+      { mode: "Aggregate metrics hide a harmed slice", symptom: "Overall utility improves while a rare region, language, or high-risk cohort regresses.", mitigation: "Predeclare critical slices, report support and uncertainty, and enforce hard guardrails." },
+      { mode: "Model policy corrupts its own labels", symptom: "Underexposed items or blocked cases disappear from training and apparent replay quality rises.", mitigation: "Log exposure/selection, retain safe exploration or audits, and model label observability." },
+    ],
+    interviewQuestions: [
+      "What information exists at the exact decision timestamp?",
+      "Which threshold serves the business constraint?",
+      "How do labels mature and who is missing from them?",
+      "What can shadow traffic prove versus a randomized canary?",
+    ],
+    decisionChecklist: [
+      "State a versioned decision contract and baseline.",
+      "Define label horizon, observability, and corrections.",
+      "Use point-in-time features and temporal evaluation.",
+      "Report operating-point and slice metrics with uncertainty.",
+      "Package model, features, calibration, threshold, and policy.",
+      "Stage, monitor, and roll back through evidence gates.",
+    ],
+    exercise:
+      "Run two timed ML mocks, one ranking and one high-stakes classification. Require each answer to include a decision contract, data/label timeline, baseline, offline and online metrics, serving path, feedback logging, rollout gates, and rollback.",
+    prerequisites: ["mock-timed-orchestration", "ml-problem-framing", "ml-drift-feedback-monitoring"],
+    relatedDesigns: ["ml-recommendation-feed", "ml-fraud-detection", "ml-eta-prediction"],
+    quiz: [
+      { prompt: "A feature's event timestamp predates the decision, but the value reached the feature store the next day. May training use it for that decision?", options: ["Yes, because event time is earlier", "No, because it was not available at decision time", "Yes, if AUC improves", "Only for test rows"], answerIndex: 1, explanation: "Point-in-time correctness uses availability as well as event time; otherwise training sees future information." },
+      { prompt: "What can a shadow deployment establish?", options: ["Causal user-outcome lift", "Live execution, feature, latency, prediction, and capacity behavior without changing the user action", "Long-term retention improvement", "Absence of feedback loops"], answerIndex: 1, explanation: "A shadow validates execution but does not assign treatment, so causal product effects require a controlled live test." },
+    ],
+  },
+  {
+    id: "mock-llm-infrastructure-synthesis",
+    week: 8,
+    day: 4,
+    tier: 3,
+    title: "LLM infrastructure mock synthesis",
+    eyebrow: "Week 8 · Day 4",
+    estimatedMinutes: 90,
+    summary:
+      "Practice two spoken LLM infrastructure designs that join token-level capacity and SLOs with versioned data, tenant isolation, evaluation, and cost-aware degradation.",
+    whyItMatters:
+      "LLM interviews reward candidates who open the GPU, retrieval, and tool boxes while still designing a reliable product. Buzzwords without token math or trust boundaries are easy to detect.",
+    objectives: [
+      "Estimate prompt/decode work, KV memory, and failure headroom.",
+      "Choose one deep dive across serving, RAG, training, post-training, or evaluation.",
+      "Integrate admission, fallbacks, safety, lineage, and cost attribution.",
+    ],
+    concepts: ["TTFT", "inter-token latency", "KV reservation", "token scheduler", "ACL retrieval", "lineage", "judge calibration", "trust boundary", "cost envelope"],
+    deepDive: [
+      {
+        title: "Start from the workload envelope",
+        summary: "LLM scale is a distribution of tokens, models, contexts, and deadlines—not one RPS number.",
+        points: [
+          "State prompt and output percentiles, streaming mix, concurrency, tenant skew, context limits, model/adapters, regions, and p50/p99 TTFT and inter-token targets.",
+          "Estimate separate prefill and decode token demand, weight residency, per-sequence KV bytes, and capacity during one failure-domain loss. Use benchmarked goodput at the target mix.",
+          "Translate estimates into replicas and parallel groups, KV watermarks, token admission, queue deadlines, warm capacity, and a degradation order.",
+        ],
+      },
+      {
+        title: "Open the differentiating subsystem",
+        summary: "Trace one artifact and one request through the hard boundary selected for the prompt.",
+        points: [
+          "For serving, show scheduler iteration, prefill/decode budget, KV allocation, cancellation, and routing. For RAG, show source revision, ACL snapshot, retrieval/rerank, context, and citation.",
+          "For training or post-training, show parallel groups, collectives, dataset/rollout lineage, checkpoint manifest, evaluation gate, and recovery.",
+          "For evaluation, show versioned test artifacts, human-gold calibration, judge bias probes, statistical comparison, and promotion decision.",
+        ],
+      },
+      {
+        title: "Close overload, safety, and economics together",
+        summary: "A fallback is valid only if it preserves the product and security contract.",
+        points: [
+          "Define tenant token/concurrency budgets, rate limits, bounded queues, early rejection, cancellation, and retry ownership. Protect safety and authorization services from being bypassed under load.",
+          "Specify compatible fallbacks: smaller model, shorter context, cached retrieval, delayed batch, or no tool. Expose chosen behavior and fail closed when residency, ACL, or tool semantics cannot be preserved.",
+          "Attribute prompt, cached, generated, rollout, evaluator, and tool cost by tenant and release; use cost per successful SLO-compliant task rather than GPU utilization alone.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "One shared fleet or workload classes", preferA: "Share for pooling and high utilization among compatible requests.", preferB: "Separate long-context, batch, safety-critical, or residency classes to protect SLOs.", watch: "Fragmented capacity versus cross-class interference." },
+      { decision: "Quality or graceful cost/latency fallback", preferA: "Keep the primary model for strict quality or tool compatibility.", preferB: "Route to a validated cheaper model when the task and contract permit.", watch: "Silent semantic changes and fallback overload." },
+      { decision: "Deep serving detail or product lifecycle", preferA: "Deepen the runtime when GPU/KV/SLO capacity is central.", preferB: "Deepen data, evaluation, or safety when product correctness is central.", watch: "Choose from prompt risk, not personal familiarity." },
+    ],
+    failureModes: [
+      { mode: "Capacity is sized from requests per second", symptom: "Long prompts and outputs cause KV OOM and tail collapse at ordinary RPS.", mitigation: "Model prefill/decode tokens, sequence lengths, KV growth, model class, and deadline goodput." },
+      { mode: "Safety is a box after generation", symptom: "Prompt injection, tenant data, or tool authority crosses boundaries before output filtering.", mitigation: "Draw trust zones and enforce identity, ACLs, capabilities, sandboxing, and egress outside model judgment." },
+      { mode: "Fallback has not been contract-tested", symptom: "Overload switches to a model that breaks schemas, tools, context, residency, or safety behavior.", mitigation: "Maintain compatibility tiers, continuous fallback evaluation, explicit routing telemetry, and fail-closed policies." },
+    ],
+    interviewQuestions: [
+      "What are the p95 prompt and output tokens?",
+      "Which resource reaches saturation first under this mix?",
+      "Where is untrusted model-generated text converted into authority?",
+      "What quality and safety contract does fallback preserve?",
+    ],
+    decisionChecklist: [
+      "Define token distributions and phase-specific SLOs.",
+      "Estimate model and KV memory under failure load.",
+      "Choose and announce one risk-based deep dive.",
+      "Bound token work, queues, retries, and tool loops.",
+      "Version data, model, prompt, policy, and evaluator artifacts.",
+      "Close with isolation, fallback, observability, and cost.",
+    ],
+    exercise:
+      "Run one 45-minute enterprise RAG mock and one large-scale inference mock. Require token/KV math, an end-to-end trace, one deep subsystem, a tenant/injection boundary, overload behavior, evaluation, and a ninety-second close.",
+    prerequisites: ["mock-timed-orchestration", "llm-evaluation-safety-operations"],
+    relatedDesigns: ["llm-enterprise-rag", "llm-large-scale-serving", "llm-multi-model-gateway"],
+    quiz: [
+      { prompt: "Which traffic description is sufficient for an LLM capacity discussion?", options: ["1,000 RPS", "Prompt/output length distributions, model mix, concurrency, SLOs, and failure headroom", "Daily users only", "GPU count only"], answerIndex: 1, explanation: "Token work, live KV state, model identity, deadlines, and resilience determine serving capacity." },
+      { prompt: "When is a fallback unsafe?", options: ["When it is cheaper", "When it cannot preserve required data policy, tool, schema, safety, or quality semantics", "When it has lower queue time", "When it is already warm"], answerIndex: 1, explanation: "Fallback is a product contract, not merely another reachable endpoint." },
+    ],
+  },
+  {
+    id: "mock-critique-remediation",
+    week: 8,
+    day: 5,
+    tier: 3,
+    title: "Critique mocks and remediate the highest-leverage misses",
+    eyebrow: "Week 8 · Day 5",
+    estimatedMinutes: 75,
+    summary:
+      "Turn recordings and artifacts into a small evidence-based mistake queue, then repair each miss with a focused drill and a scheduled re-test.",
+    whyItMatters:
+      "Repeating full mocks without diagnosis rehearses the same habits. Senior preparation improves fastest when critique distinguishes a knowledge gap from decision, communication, and time-control failures.",
+    objectives: [
+      "Score requirements, estimation, architecture, data, reliability, trade-offs, communication, and time separately.",
+      "Capture only three causal, observable mistakes per mock.",
+      "Convert each mistake into a drill, success criterion, and review date.",
+    ],
+    concepts: ["evidence timestamp", "rubric", "root cause", "counterfactual", "micro-drill", "retrieval practice", "spaced review", "transfer test"],
+    deepDive: [
+      {
+        title: "Critique observable behavior, not identity",
+        summary: "A useful finding names the moment, consequence, and better move.",
+        points: [
+          "Use recording timestamps, board states, omitted units, unanswered prompts, contradictions, and phase durations as evidence. Avoid labels such as 'bad at scale.'",
+          "Score dimensions independently: a technically correct answer can still miss requirements, time, or communication; a fluent answer can lack correctness and recovery.",
+          "Write the counterfactual sentence or diagram that would have corrected the path, then identify whether the root cause was recall, reasoning, prioritization, or delivery.",
+        ],
+      },
+      {
+        title: "Prioritize three causal misses",
+        summary: "Select errors likely to recur and change the interview outcome.",
+        points: [
+          "Prefer upstream misses: an unstated invariant may cause the wrong database, API, and failure behavior, while a forgotten secondary metric may be local.",
+          "Group repeated symptoms under one root cause, such as failing to convert workload distributions into admission. Do not create ten nearly identical tasks.",
+          "Rank by interview impact, recurrence, and tractability. Preserve strengths as reusable patterns but spend the queue on gaps.",
+        ],
+      },
+      {
+        title: "Repair with progressively broader retrieval",
+        summary: "A remediation is complete only when the skill transfers under time and a different prompt.",
+        points: [
+          "Start with a 5–15 minute micro-drill: one KV estimate, ACL trace, consistency table, metric choice, or ninety-second close, without notes.",
+          "Then integrate the skill into a 20-minute subsystem and a new 45-minute mock. Use an objective criterion such as correct units, all trust boundaries, or completion before the phase deadline.",
+          "Schedule short reviews after one day and one week; close the mistake only after two successful retrievals on different designs.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Full mocks or micro-drills", preferA: "Use full mocks to test integration, pacing, and transfer.", preferB: "Use focused drills to repair one measurable weakness efficiently.", watch: "Only drilling fragments skills; only mocking repeats unresolved errors." },
+      { decision: "Self-review or external feedback", preferA: "Self-review recordings for reasoning and time habits.", preferB: "Use a peer for ambiguity, communication, and blind-spot calibration.", watch: "Neither reviewer should score from vague impressions without evidence." },
+      { decision: "Fix broad weakness or specific behavior", preferA: "Name a broad theme to group recurrence.", preferB: "Practice a narrow behavior with a binary success criterion.", watch: "Goals such as 'be more senior' cannot guide rehearsal." },
+    ],
+    failureModes: [
+      { mode: "Mistake log becomes an exhaustive transcript", symptom: "Dozens of low-value notes receive no focused practice.", mitigation: "Keep only three causal misses per mock and assign each a drill, owner, criterion, and review date." },
+      { mode: "Scores improve only on the repeated prompt", symptom: "The repaired answer is memorized but the same concept fails in a new system.", mitigation: "Require a transfer test on a different workload and altered constraint before resolution." },
+      { mode: "Feedback is non-actionable", symptom: "Entries say 'communicate better' or 'know databases' without evidence or next action.", mitigation: "Attach timestamp, consequence, counterfactual, drill, and objective success signal." },
+    ],
+    interviewQuestions: [
+      "What exact moment caused the largest downstream error?",
+      "Was the root cause knowledge, reasoning, prioritization, or delivery?",
+      "What ten-minute drill isolates it?",
+      "What new prompt will prove transfer?",
+    ],
+    decisionChecklist: [
+      "Review recording, board, and phase times.",
+      "Score rubric dimensions with concrete evidence.",
+      "Select no more than three causal misses.",
+      "Write counterfactual behavior and a micro-drill.",
+      "Set an objective success criterion and review date.",
+      "Require two successful retrievals including one transfer mock.",
+    ],
+    exercise:
+      "Review the last three mocks and cluster recurring symptoms. Choose the top three root causes, complete one ten-minute drill per cause, then run a new 45-minute transfer mock and compare timestamps and rubric evidence.",
+    prerequisites: ["mock-classic-synthesis", "mock-ml-synthesis", "mock-llm-infrastructure-synthesis"],
+    relatedDesigns: ["llm-generative-evaluation", "llm-preference-arena"],
+    quiz: [
+      { prompt: "Which mistake-log entry is most actionable?", options: ["Be better at databases", "At 18:20 I chose eventual inventory writes before stating the no-oversell invariant; next drill is a six-operation consistency table in eight minutes", "Study more", "The prompt was hard"], answerIndex: 1, explanation: "It contains evidence, consequence, a corrected framing, and a bounded rehearsal." },
+      { prompt: "When should a mistake be marked resolved?", options: ["After rereading the notes", "After one memorized replay", "After successful retrieval twice, including transfer to a different design", "At the end of the week automatically"], answerIndex: 2, explanation: "Transfer and spaced retrieval provide stronger evidence than familiarity with one answer." },
+    ],
+  },
+  {
+    id: "mock-evolution-executive-close",
+    week: 8,
+    day: 6,
+    tier: 3,
+    title: "Handle 10× evolution and deliver the executive close",
+    eyebrow: "Week 8 · Day 6",
+    estimatedMinutes: 75,
+    summary:
+      "Evolve a working design under 10× load, new regions, stricter policy, and model changes, then close with decisions, residual risks, and the next evidence to collect.",
+    whyItMatters:
+      "Senior follow-ups test whether the design has an evolution path rather than a frozen ideal state. The final synthesis reveals whether the candidate can communicate architecture to a decision-maker.",
+    objectives: [
+      "Find the first bottleneck under one changed dimension instead of multiplying every component.",
+      "Plan migration with compatibility, shadowing, backfill, cutover, and rollback.",
+      "Deliver a concise close covering requirements, architecture, trade-offs, risk, and validation.",
+    ],
+    concepts: ["10× stress", "sensitivity", "migration", "dual read/write", "backfill watermark", "compatibility", "risk register", "executive summary"],
+    deepDive: [
+      {
+        title: "Stress one dimension at a time",
+        summary: "Ten times users, bytes, tokens, models, or regions create different bottlenecks.",
+        points: [
+          "Return to the original capacity model and identify which assumption crosses a threshold first: partition throughput, cache working set, queue drain, network, KV memory, collective time, or human-review capacity.",
+          "Account for skew and failure headroom before multiplying fleet count. At 10×, coordination, hot keys, and control planes often fail before aggregate compute.",
+          "State what remains unchanged, the trigger metric for the next architecture, and the smallest intervention that restores margin.",
+        ],
+      },
+      {
+        title: "Evolve through a reversible migration",
+        summary: "The route from current to target architecture is part of the design.",
+        points: [
+          "Define old/new API and data compatibility, version ownership, dual-write or change-capture semantics, backfill ordering, validation, and a high-water mark.",
+          "Shadow reads or outputs, compare by key and slice, canary stable traffic, and cut over only after new state catches the live stream. Prevent an old writer from overwriting new state with epochs or version checks.",
+          "Keep rollback viable until the point of irreversibility is explicit. Reconcile divergent writes and retire old state only after the safety window and audit pass.",
+        ],
+      },
+      {
+        title: "Close like an accountable owner",
+        summary: "The close compresses the design into a decision and a risk posture.",
+        points: [
+          "Restate the top user flow, invariant, scale, and SLO; then trace the critical path through the chosen sources of truth and derived systems.",
+          "Name the central trade-off and why it fits current requirements, followed by the two largest residual risks and their detection or containment.",
+          "End with the first production benchmark, experiment, or data sample that could overturn the design. Do not introduce a new subsystem in the close.",
+        ],
+      },
+    ],
+    tradeoffs: [
+      { decision: "Scale up current design or introduce a new tier", preferA: "Scale the current path while thresholds and operational simplicity remain acceptable.", preferB: "Add partitioning, hierarchy, or specialization when a measured bottleneck crosses its design limit.", watch: "Premature architecture taxes every request; delayed migration creates emergency cutovers." },
+      { decision: "Dual write or change-data capture", preferA: "Dual write when the application can make idempotent compatibility explicit.", preferB: "Use an ordered change stream when one source of truth should feed the target.", watch: "Neither is automatically atomic; define gaps, retries, ordering, and reconciliation." },
+      { decision: "Confident recommendation or exhaustive caveats", preferA: "Recommend one design from stated assumptions and evidence.", preferB: "Highlight only uncertainties capable of changing it.", watch: "False certainty hides risk; exhaustive hedging obscures judgment." },
+    ],
+    failureModes: [
+      { mode: "10× answer multiplies every server by ten", symptom: "The response misses new hot keys, coordination limits, control-plane load, and cost cliffs.", mitigation: "Recompute the workload distribution, locate the first threshold, and change only the binding boundary." },
+      { mode: "Migration has no correctness boundary", symptom: "Old and new systems disagree during backfill or rollback and neither is authoritative.", mitigation: "Define source of truth, versions/epochs, change order, validation watermark, cutover, and reconciliation." },
+      { mode: "Close is a component inventory", symptom: "The listener cannot identify the core decision, trade-off, or remaining risk.", mitigation: "Use the sequence: requirement and scale, critical path, central trade-off, two risks, next validation." },
+    ],
+    interviewQuestions: [
+      "Which exact assumption fails first at 10×?",
+      "How does new state catch up while writes continue?",
+      "What makes rollback safe before and after cutover?",
+      "What production evidence could invalidate the recommendation?",
+    ],
+    decisionChecklist: [
+      "Change one workload dimension and recompute thresholds.",
+      "Identify the first bottleneck including skew and failure load.",
+      "Specify old/new compatibility and one source of truth.",
+      "Backfill, catch up, validate, canary, cut over, and reconcile.",
+      "Name the central trade-off and two residual risks.",
+      "Finish with one measurement that could change the design.",
+    ],
+    exercise:
+      "Take a completed classic, ML, or LLM design through three follow-ups: 10× traffic, a second region with a stricter residency rule, and a model/data migration. Draw the reversible cutover, then deliver a ninety-second executive close.",
+    prerequisites: ["mock-critique-remediation"],
+    relatedDesigns: ["llm-large-scale-serving", "llm-enterprise-rag", "llm-post-training-platform"],
+    quiz: [
+      { prompt: "What is the best first response to a 10× scale follow-up?", options: ["Multiply every component by ten", "Recompute the changed workload and identify the first threshold or bottleneck", "Replace every database", "Remove failure headroom"], answerIndex: 1, explanation: "Different dimensions stress different boundaries; the architecture should evolve from the first measured limit." },
+      { prompt: "Which final-close structure is strongest?", options: ["List every technology", "Requirement/scale, critical path, central trade-off, top risks, next validation", "Introduce a new design", "Repeat all estimates"], answerIndex: 1, explanation: "This structure communicates the decision, reasoning, risk posture, and learning plan concisely." },
+    ],
+  },
+];
+
+export const llmPrompts: DesignPrompt[] = [
+  {
+    id: "llm-enterprise-rag",
+    title: "Enterprise RAG assistant",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design an enterprise assistant that answers questions over documents from drives, wikis, and ticket systems. It must cite evidence, reflect updates quickly, and never retrieve content the caller could not access at query time.",
+    requirementsToExplore: [
+      "Connector ingestion, parsing, chunking, embedding, update, deletion, and source freshness.",
+      "Hybrid retrieval, metadata filters, query rewriting, reranking, context construction, and citations.",
+      "Nested groups, tenant isolation, point-in-time authorization, revocation, and audit.",
+      "Retrieval and answer evaluation, prompt-injection defense, latency, availability, and cost.",
+    ],
+    expectedTopics: [
+      "Versioned document and derived-artifact lineage",
+      "Authorization-aware lexical and vector candidate generation",
+      "Reranking and evidence-bound answer generation",
+      "Freshness watermarks and deletion completeness",
+      "Trust boundaries for retrieved text and tools",
+    ],
+    commonFailureModes: [
+      "Filtering global top-k after retrieval and leaking or starving authorized results.",
+      "Updating vectors without deleting old chunks, caches, and citation targets.",
+      "Measuring answer fluency without evidence recall and citation correctness.",
+      "Treating instructions inside retrieved documents as trusted policy.",
+    ],
+    followUpQuestions: [
+      "How does a group-membership revocation take effect before every index is updated?",
+      "How would you support legal hold while honoring ordinary deletion?",
+      "What changes when one source is twelve hours behind?",
+      "How do you diagnose whether a wrong answer came from retrieval, reranking, or generation?",
+    ],
+    reference: {
+      scope: [
+        "Support tenant-scoped connectors, indexing, authenticated question answering, evidence citations, feedback, and administration.",
+        "Assume source systems remain authoritative for document bytes and permissions; the RAG platform stores versioned derived copies.",
+        "Exclude general autonomous write actions from the first version; retrieved content remains untrusted input.",
+      ],
+      apis: [
+        "POST /v1/connectors/{id}/sync {cursor} -> {jobId, acceptedCursor}",
+        "POST /v1/query {tenantId, principalToken, conversationId, question, filters} -> streamed {answer, citations[], modelRevision, indexWatermarks}",
+        "GET /v1/citations/{citationId} -> authorized source excerpt and immutable version metadata",
+        "POST /v1/feedback {queryId, rating, issueType, citationIds} -> receipt",
+        "DELETE /v1/documents/{source}/{documentId} {sourceRevision} -> tombstone status",
+      ],
+      dataModel: [
+        "DocumentVersion(tenant, source, documentId, sourceRevision, contentHash, observedAt, aclRevision, state)",
+        "ChunkVersion(documentVersion, chunkId, offsets, textHash, parserVersion, chunkerVersion)",
+        "EmbeddingArtifact(chunkVersion, embeddingModelVersion, vector, indexGeneration)",
+        "AclSnapshot(tenant, documentVersion, policyVersion, principals/groups, sourceObservedAt)",
+        "QueryTrace(queryId, principal, aclDecisionVersion, rewrite, candidateIds/scores, rerankVersion, contextIds, model/prompt revisions, citations)",
+        "SourceWatermark(connector, contentCursor, aclCursor, deleteCursor, indexedAt)",
+      ],
+      architecture: [
+        "Connectors publish idempotent source events to an ingestion log; parsers and chunkers write immutable versioned artifacts to object storage.",
+        "Embedding workers update tenant-partitioned vector indexes while lexical indexers build exact-term postings; an active-generation manifest controls visibility.",
+        "The query gateway authenticates the principal, resolves current group/policy state, rewrites the query, and sends permission-filtered searches to both indexes.",
+        "A fusion service merges candidates, a reranker scores bounded authorized chunks, and a context builder adds versioned text, offsets, and trust labels.",
+        "The model gateway generates from labeled evidence; it validates citation IDs, versions, and offsets before each citation-bearing event is released—or buffers the answer for final validation—then writes a redacted audit trace.",
+      ],
+      invariants: [
+        "No chunk enters retrieval, context, citation fetch, cache, or logs outside its tenant and point-in-time authorization decision.",
+        "Every citation resolves to the exact immutable document version and offsets supplied to generation.",
+        "A published index generation never references incomplete parse or embedding artifacts.",
+        "Content may use an explicit bounded-lag watermark; authorization, revocation, and deletion fail closed whenever their watermark does not prove coverage through the query’s authorization snapshot, unless authoritative current policy is rechecked before text materialization.",
+      ],
+      deepDives: [
+        {
+          title: "Point-in-time permission path",
+          summary: "Authorization is evaluated before candidate materialization and checked again before source text leaves storage.",
+          points: [
+            "Translate current identity and nested groups into a versioned principal set; bind it to the query trace and push tenant/ACL predicates into lexical and vector search.",
+            "Use an urgent revocation/tombstone path and a current source-policy recheck before text fetch when the index ACL watermark is stale.",
+            "Deny on missing policy, cross-tenant cache keys, stale revocation watermark, or citation reauthorization failure.",
+          ],
+        },
+        {
+          title: "Fresh update and delete lifecycle",
+          summary: "Each source revision creates a new derived graph while tombstones invalidate every readable surface.",
+          points: [
+            "Deduplicate connector events by source revision; build new chunks and embeddings off-path; atomically advance the active version after completeness.",
+            "Publish deletes to vector, lexical, content, context, answer, and citation caches, tracking per-store acknowledgment and age.",
+            "Expose content, ACL, and delete watermarks separately by source so a stalled connector can be isolated or queries can fail closed.",
+          ],
+        },
+        {
+          title: "Evaluation decomposition",
+          summary: "Diagnose candidate recall, reranker ordering, answer correctness, and evidence use independently.",
+          points: [
+            "Maintain versioned queries with judged evidence, authorized principal snapshots, expected abstentions, and task slices.",
+            "Measure recall@k/nDCG before and after reranking, citation precision/coverage, groundedness, task correctness, latency, and ACL violation rate.",
+            "Sample live failures for blinded human review and calibrate any LLM judge against that reference before using it for release gates.",
+          ],
+        },
+      ],
+      scaling: [
+        "Partition indexes and queues by tenant/source; isolate very large tenants and preserve per-tenant admission and cost budgets.",
+        "Scale embedding workers from source backlog age and token work; batch by model while preserving idempotent artifact identity.",
+        "Cache only versioned, authorization-scoped query and prefix results; invalidate from document and ACL revisions.",
+        "Bound candidate counts, reranker batch, context tokens, generation tokens, and concurrent queries; reject before deadline or policy breach.",
+      ],
+      observability: [
+        "Per-source content, ACL, and delete lag plus stuck version counts.",
+        "Candidate recall and zero-result rate by tenant, ACL cohort, source, query class, and index generation.",
+        "Reranker lift, citation precision/coverage, groundedness, abstention, and human/judge disagreement.",
+        "p50/p99 search, rerank, TTFT, inter-token, and total latency; input/output tokens and cost per successful answer.",
+        "Authorization denials, stale-policy fail-closeds, cross-tenant canary probes, injection detections, and tool denials.",
+      ],
+    },
+  },
+  {
+    id: "llm-multi-model-gateway",
+    title: "Multi-model inference gateway",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design a global gateway that exposes one chat and generation API over hosted and external models. It must route by capability, tenant policy, quality, residency, latency, and budget while providing quotas, compatible fallbacks, streaming, and accurate usage attribution.",
+    requirementsToExplore: [
+      "Model registry, capability and compatibility profiles, adapters, versions, and rollout state.",
+      "Authentication, tenant policy, token quotas, admission, routing, retries, fallback, and idempotency.",
+      "Streaming semantics, cancellation, tool schemas, moderation, logging, and usage billing.",
+      "Regional failover, provider degradation, cache locality, cost, and SLO observability.",
+    ],
+    expectedTopics: [
+      "Policy-constrained routing and explainable route decisions",
+      "Length-aware token admission and deadline budgets",
+      "Contract-tested fallback tiers",
+      "Tenant isolation and data residency",
+      "Versioned usage and cost ledger",
+    ],
+    commonFailureModes: [
+      "Choosing the cheapest model without validating quality, context, tool, or policy compatibility.",
+      "Retrying streamed generations after partial output and creating duplicated or contradictory text.",
+      "Using RPS quotas for requests whose token and tool-loop costs differ by orders of magnitude.",
+      "Logging prompts or sharing prefix caches across tenant or residency boundaries.",
+    ],
+    followUpQuestions: [
+      "How do you route when the preferred provider is slow but has already streamed tokens?",
+      "How does a tenant pin a model revision for reproducibility?",
+      "How do you avoid route oscillation and cold-cache thrash?",
+      "What changes for a request whose data may not leave one region?",
+    ],
+    reference: {
+      scope: [
+        "Provide authenticated chat/completion and model-discovery APIs with streaming, cancellation, quotas, usage, and policy-constrained routing.",
+        "Support internal serving pools and external providers behind adapters; the gateway does not hide the resolved model revision from callers.",
+        "Treat tool execution as a separate least-privilege subsystem, not an ambient capability of model providers.",
+      ],
+      apis: [
+        "GET /v1/models?tenant=... -> capabilities, context limits, regions, compatibility tier, and current availability",
+        "POST /v1/responses {requestId, modelPreference, messages, tools, maxOutputTokens, deadline, policy} -> streamed events and final usage",
+        "POST /v1/cancel/{requestId} -> cancellation receipt",
+        "GET /v1/requests/{requestId} -> state, resolved route, stop reason, and usage",
+        "GET /v1/usage?tenant=...&window=... -> token, tool, provider, retry, and cost aggregates",
+      ],
+      dataModel: [
+        "ModelRevision(modelId, revision, tokenizer, provider, capabilities, contextLimit, regions, safetyProfile, costSchedule)",
+        "CompatibilityTier(tierId, schema/tool/quality/safety requirements, allowedFallbacks)",
+        "TenantPolicy(tenant, allowedModels/providers/regions, retention, quotas, budget, priority, fallbackConsent)",
+        "RequestRecord(requestId, tenant, normalizedPayloadHash, deadline, state, routeDecision, emittedOffset, stopReason)",
+        "UsageLedger(requestId, modelRevision, input/cached/output tokens, tool use, provider charge, retry waste, policy version)",
+      ],
+      architecture: [
+        "An edge authenticates, validates schemas and token limits, resolves residency/tenant policy, and creates an idempotent request record.",
+        "A routing control plane publishes model health, capability, quality, cost, rollout, and regional placement snapshots to stateless routers.",
+        "The router filters ineligible routes, scores eligible ones by SLO risk and budget, applies stable affinity, and sends the request through a provider-specific adapter.",
+        "A stream coordinator sequences events, propagates cancellation/deadline, and finalizes usage; moderation and tool authorization remain policy services outside providers.",
+        "A metering pipeline reconciles gateway token counts with provider invoices and emits tenant budgets and anomaly signals.",
+      ],
+      invariants: [
+        "A request never routes to a model, provider, region, retention mode, or tool set forbidden by the policy snapshot recorded at admission.",
+        "One request ID and payload hash create one logical billable request; reuse with different payload is rejected.",
+        "Fallback occurs only within a declared compatibility tier and is exposed in the response and usage record.",
+        "Cancellation and deadlines stop new token/tool work and converge to one terminal state even when adapters retry callbacks.",
+      ],
+      deepDives: [
+        {
+          title: "Filter, then score, then stabilize",
+          summary: "Hard constraints precede optimization, and affinity prevents route thrash.",
+          points: [
+            "Filter by tenant allowlist, residency, context, modality, tool/schema support, safety, and release state before considering latency or cost.",
+            "Score remaining routes using queue/token estimates, observed TTFT/ITL, quality tier, provider errors, and marginal cost; record the feature snapshot and reason.",
+            "Use bounded sticky assignment or hysteresis so small metric noise does not repeatedly move traffic and erase warm-weight or prefix locality.",
+          ],
+        },
+        {
+          title: "Streaming, retry, and fallback state machine",
+          summary: "Before output, an idempotent retry may be transparent; after output, semantics change.",
+          points: [
+            "Track queued, dispatched, first-token, streaming, tool-wait, completed, cancelled, and failed states with a monotonic output-event sequence.",
+            "Retry only safe pre-output failures within the original deadline and retry budget. After partial output, resume only if the provider offers a compatible cursor; otherwise surface failure rather than splice another model silently.",
+            "Reserve output/tool budget, propagate cancellation, and meter wasted retry tokens separately so overload is visible rather than hidden in provider cost.",
+          ],
+        },
+        {
+          title: "Isolation and cost contract",
+          summary: "Every stateful layer and charge belongs to a tenant, policy, request, and model revision.",
+          points: [
+            "Namespace response, prefix, and tokenization caches by tenant-sharing policy and all semantic versions; redact content before centralized logs.",
+            "Enforce token-rate, concurrent-KV, daily spend, and tool-loop limits. Reserve estimated cost at admission and reconcile actual usage at completion.",
+            "Alert on provider/gateway meter discrepancies, retry waste, unexplained cache sharing, and spend per successful SLO-compliant task.",
+          ],
+        },
+      ],
+      scaling: [
+        "Shard request state and quota counters by tenant while preserving atomic budget reservation per request.",
+        "Distribute signed routing snapshots and health summaries; keep the request data plane independent of a live central registry call.",
+        "Use regional pools with tenant residency filters, stable affinity, warm fallback capacity, and failure-domain headroom.",
+        "Apply hierarchical admission: tenant token budgets, model-pool KV/token capacity, provider limits, and global spend guardrails.",
+      ],
+      observability: [
+        "Route selection and rejection by hard constraint, score component, model revision, tenant tier, and region.",
+        "Queue, TTFT, inter-token, total latency, cancellation lag, and goodput by route and token-length bucket.",
+        "Fallback rate, partial-stream failures, retry amplification, provider error/limit state, and route churn.",
+        "Input/cached/output/tool/retry tokens, estimated versus invoiced cost, quota denials, and spend per successful task.",
+        "Cross-tenant cache probes, policy violations, residency denials, moderation/tool decisions, and log-redaction failures.",
+      ],
+    },
+  },
+  {
+    id: "llm-large-scale-serving",
+    title: "Large-scale LLM serving",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design a multi-region service for a large decoder model with streaming chat traffic, long-context summarization, and asynchronous batch jobs. Meet separate TTFT and inter-token SLOs while maximizing goodput and surviving a zone failure.",
+    requirementsToExplore: [
+      "Prefill/decode execution, model parallelism, weight loading, KV memory, and GPU topology.",
+      "Continuous batching, paged attention, prefix caching, speculative decoding, and quantization.",
+      "Length-aware admission, tenant fairness, cancellation, autoscaling, and overload degradation.",
+      "Regional placement, rollout, observability, capacity testing, and cost attribution.",
+    ],
+    expectedTopics: [
+      "TTFT versus inter-token latency and deadline goodput",
+      "KV-cache scaling and block watermarks",
+      "Iteration-level scheduling and prefill/decode balance",
+      "Replica versus tensor/pipeline parallel topology",
+      "Warm capacity and failure-safe admission",
+    ],
+    commonFailureModes: [
+      "Sizing from peak FLOPS or RPS instead of benchmarked token mix and KV state.",
+      "Letting long prefills stall every active decoder.",
+      "Admitting from current KV use without reserving output growth.",
+      "Autoscaling only after request queues exceed their deadlines.",
+    ],
+    followUpQuestions: [
+      "How would prefill/decode disaggregation change the architecture?",
+      "What happens when one rank of a tensor-parallel replica slows down?",
+      "How do you protect interactive users from 128k batch prompts?",
+      "How do you roll out a new quantized model without hiding quality regressions?",
+    ],
+    reference: {
+      scope: [
+        "Serve one large model revision family for interactive streaming and isolated asynchronous batch classes across multiple regions.",
+        "Define SLOs for queue, TTFT, inter-token, completion, availability, and cost; expose explicit admission and cancellation semantics.",
+        "Assume accelerators are scarce and model load time requires proactive warm capacity.",
+      ],
+      apis: [
+        "POST /v1/generate {requestId, tenant, modelRevision, prompt, maxOutputTokens, priority, deadline, sampling} -> token event stream and final usage",
+        "POST /v1/batches {tenant, modelRevision, objectUri, completionDeadline} -> batchId",
+        "GET /v1/batches/{batchId} -> progress, failures, output manifest, and usage",
+        "POST /v1/cancel/{requestIdOrBatchId} -> terminal-state receipt",
+        "GET /v1/capacity/{modelRevision} -> admitted classes, estimated wait, and regional status",
+      ],
+      dataModel: [
+        "ServingProfile(modelRevision, tokenizer, precision, TP/PP degree, KV format, kernel/config versions)",
+        "GenerationRequest(requestId, tenant, promptTokens, reservedOutputTokens, deadline, class, state, replicaId, stopReason)",
+        "KvAllocation(requestId, prefixKey, blockIds, tokenRange, referenceCounts, lastUsedIteration)",
+        "ReplicaState(replicaId, region/zone, topology, loadedRevision, freeKvBlocks, activeTokens, healthEpoch)",
+        "UsageRecord(requestId, queueMs, prefillTokens/ms, decodeTokens/ms, delivered/wasted tokens, cost)",
+      ],
+      architecture: [
+        "A regional gateway tokenizes with the pinned revision, enforces tenant/request limits, and asks a model-pool admission service to reserve token work and KV blocks.",
+        "A scheduler assigns requests to healthy warm replicas with prefix affinity and fairness; each replica runs iteration-level prefill/decode scheduling over paged KV blocks.",
+        "Tensor-parallel groups are placed inside the fastest supported topology and health as one replica; independent replicas absorb aggregate traffic and failures.",
+        "Interactive and batch queues share only deliberate capacity budgets; batch work yields to reserved decode and deadline-safe interactive work.",
+        "A rollout controller warms weights, runs shadow/canary quality and load gates, shifts stable traffic, and retains the previous profile for rollback.",
+      ],
+      invariants: [
+        "Admission never reserves more future KV/token work than the pool can honor after required failure headroom.",
+        "A request executes under one compatible model, tokenizer, precision, kernel, and safety profile recorded in usage.",
+        "Tenant quotas and isolation apply to queued, active, cached-prefix, retry, and batch work.",
+        "Cancellation stops new token and tool scheduling at the next enforceable boundary, reclaims scheduler and KV state idempotently, converges to one terminal state, and records unavoidable in-flight work or provider charges separately.",
+      ],
+      deepDives: [
+        {
+          title: "Token and KV capacity model",
+          summary: "Capacity combines phase-specific benchmark curves and live-sequence memory.",
+          points: [
+            "Bucket prompt/output lengths and benchmark prefill tokens/s, decode tokens/s, TTFT/ITL, and KV bytes under the target TP/precision/batch profile.",
+            "Aggregate unshared KV is about 2 × layers × KV heads × head dimension × cached tokens × element bytes. Compute physical bytes from unique cached blocks, subtract duplicate shared prefixes, then add block-tail/metadata waste, runtime workspace, and failure reserve; per-rank bytes follow actual KV-head sharding or replication, not TP size alone.",
+            "Convert arrival mix into queued prefill work, active decode steps, and concurrent KV occupancy; validate with trace replay rather than a single synthetic batch.",
+          ],
+        },
+        {
+          title: "Continuous scheduler and overload",
+          summary: "Every iteration allocates a bounded token budget across waiting prefills and live decoders.",
+          points: [
+            "Reserve decode progress to protect ITL, chunk long prefills, replace completed sequences immediately, and use weighted fairness across tenant/workload classes.",
+            "Admit with prompt cost, reserved output, deadline, free blocks, and zone-loss headroom; queue only while the estimated start can meet the deadline.",
+            "Degrade by pausing batch, reducing allowed output/context for consenting tiers, routing compatible profiles, then rejecting early—never by unbounded queueing.",
+          ],
+        },
+        {
+          title: "Replica lifecycle and correlated failure",
+          summary: "A multi-rank replica is one failure unit and weight warmup is part of recovery time.",
+          points: [
+            "Place ranks topology-aware, measure collectives by rank, remove the group on epoch or health mismatch, and drain rather than partially reuse corrupt state.",
+            "Maintain warm N+failure-domain capacity, stage model weights near accelerators, and scale from token backlog/KV pressure before deadlines fail.",
+            "Canary new kernels, precision, and schedulers with identical trace replay plus live slices; gate both output quality and deadline goodput.",
+          ],
+        },
+      ],
+      scaling: [
+        "Prefer independent replicas after one serving profile fits; increase TP/PP only for fit or measured single-request latency requirements.",
+        "Partition pools by revision, region, and incompatible workload class while retaining shared overflow only through explicit compatibility.",
+        "Use paged KV allocation, exact-version prefix sharing, cancellation reclamation, and free-block safety watermarks.",
+        "Keep a warm buffer for zone loss and load time; route with hysteresis to protect weight and prefix locality.",
+      ],
+      observability: [
+        "Queue delay, TTFT, inter-token p50/p95/p99, total latency, goodput, and cancellation lag by prompt/output bucket.",
+        "Prefill/decode token rate, batch composition, scheduler budget use, iteration stalls, GPU compute/memory bandwidth, and collective time by rank.",
+        "KV allocated/useful/shared bytes, free blocks, block-tail waste, eviction/offload/recompute, and orphan allocations.",
+        "Admission/rejection reason, tenant fairness, batch starvation, warmup time, replica churn, and failover capacity.",
+        "Quality/safety regression by serving profile plus delivered, wasted, cached, and retry token cost.",
+      ],
+    },
+  },
+  {
+    id: "llm-post-training-platform",
+    title: "Post-training platform",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design a multi-team platform for supervised fine-tuning and preference optimization. It must support SFT, DPO, and reward-model/RLHF-style campaigns with distributed rollouts, complete lineage, evaluation gates, checkpoint recovery, and safe promotion.",
+    requirementsToExplore: [
+      "Dataset intake, transformation, dedupe, provenance, PII/licensing policy, contamination, and immutable manifests.",
+      "SFT, preference pairs, reward-model training/serving, policy/reference models, rollout workers, and optimization jobs.",
+      "Distributed scheduling, checkpoints, retries, lineage, quotas, and cost accounting.",
+      "Capability/safety evaluation, regression gates, registry promotion, canary, and rollback.",
+    ],
+    expectedTopics: [
+      "Campaign DAG and semantic version pinning",
+      "SFT versus DPO versus online rollout loop",
+      "Distributed rollout and training coordination",
+      "Manifest-based checkpoint and dataset lineage",
+      "Reward hacking probes and release gates",
+    ],
+    commonFailureModes: [
+      "Mixing rollouts from different policy, tokenizer, prompt, tool, or reward versions.",
+      "Publishing a checkpoint before all optimizer/model/RNG/data-cursor shards commit.",
+      "Optimizing a reward score without blinded human and adversarial evaluation.",
+      "Allowing training jobs to read unapproved datasets or export sensitive generations.",
+    ],
+    followUpQuestions: [
+      "How can a failed campaign resume on a different world size?",
+      "What changes operationally when the team chooses DPO instead of RLHF-style training?",
+      "How do you prevent stale rollout workers from submitting samples?",
+      "What artifacts must roll back with model weights?",
+    ],
+    reference: {
+      scope: [
+        "Provide governed dataset releases, campaign orchestration, distributed SFT/preference jobs, evaluation, registry, and staged serving handoff.",
+        "Support organization-scoped projects and isolated compute pools; arbitrary user code runs only in constrained training environments.",
+        "Keep source data and immutable artifacts in controlled storage; the scheduler stores metadata and references rather than embedding datasets in job specs.",
+      ],
+      apis: [
+        "POST /v1/datasets {sources, transformSpec, policyTags, splitSpec} -> datasetReleaseId",
+        "POST /v1/campaigns {baseRevision, sftRelease, preferenceRelease, algorithm, config, evalSuiteIds} -> campaignId",
+        "POST /v1/campaigns/{id}/rollouts {policyCheckpoint, promptRelease, sampling, rewardBundle, toolEnvironment} -> rolloutJobId",
+        "GET /v1/campaigns/{id} -> DAG, jobs, checkpoints, metrics, lineage, cost, and gate status",
+        "POST /v1/checkpoints/{id}/promote {targetStage, gateEvidence} -> registry release",
+        "POST /v1/releases/{id}/rollback {targetRelease, reason} -> rollout action",
+      ],
+      dataModel: [
+        "DatasetRelease(id, sourceHashes, transform/code/template/tokenizer versions, membership manifest, splits, policy approvals)",
+        "Campaign(id, owner, baseModel, algorithm, config, input releases, code image, budget, state)",
+        "RolloutShard(id, prompt release, policy/reference/reward revisions, sampling, tool environment, outputs, rewards, checksum)",
+        "CheckpointManifest(id, parent, globalStep, topology, model/optimizer/scheduler/RNG/dataCursor shards, metrics, state)",
+        "EvaluationRun(id, candidate, suite/rubric/judge versions, raw artifacts, human sample, results, gate decision)",
+        "ReleaseBundle(id, checkpoint, tokenizer, prompt/template, adapters, safety policy, serving profile, priorRelease)",
+      ],
+      architecture: [
+        "A dataset service validates provenance and policy, executes versioned transforms, computes dedupe/contamination reports, and publishes immutable manifests.",
+        "A campaign orchestrator builds a DAG of SFT, reward/reference, rollout, optimization, checkpoint, and evaluation jobs under quotas and budgets.",
+        "A topology-aware scheduler assigns distributed training and rollout workers; workers exchange only signed manifests and write immutable shards to object storage.",
+        "A checkpoint coordinator publishes a complete manifest after all rank shards validate; an evaluation service consumes committed candidates only.",
+        "A registry enforces hard gates and creates a complete serving bundle for shadow/canary rollout; the deployment controller retains a warm known-good rollback target.",
+      ],
+      invariants: [
+        "Every training sample, rollout, reward, checkpoint, evaluation result, and release is transitively traceable to immutable versions and policy approvals.",
+        "A job consumes one declared semantic version set; late shards from an old lease or policy epoch are rejected.",
+        "Only complete manifest-committed datasets and checkpoints are readable by downstream stages.",
+        "Registry promotion cannot bypass required capability, safety, lineage, budget, and serving-compatibility gates.",
+      ],
+      deepDives: [
+        {
+          title: "Campaign state and stale-worker fencing",
+          summary: "Each job attempt runs under a lease epoch and produces immutable outputs bound to that epoch.",
+          points: [
+            "The orchestrator materializes exact inputs and creates attempts with topology, budget, deadline, and monotonically increasing epoch.",
+            "Workers heartbeat and upload attempt-scoped shards; the commit service rejects results after cancellation, supersession, or semantic-version mismatch.",
+            "Retries reuse logical job identity but create new attempts, allowing cost and duplicate output to be reconciled without aliasing state.",
+          ],
+        },
+        {
+          title: "DPO and rollout-based branches",
+          summary: "The DAG diverges after preference data depending on whether training needs online generation and reward service.",
+          points: [
+            "DPO reads chosen/rejected pairs and a pinned reference under one trainer, avoiding reward-model serving and iterative policy rollout operations.",
+            "RLHF-style campaigns snapshot the policy, generate rollouts, score with versioned reward/rules, normalize or estimate advantages, update, and repeat with bounded staleness.",
+            "Both branches retain parentage, evaluate the same blinded suites, and produce a full release bundle rather than a weight file alone.",
+          ],
+        },
+        {
+          title: "Checkpoint, evaluation, and promotion",
+          summary: "Only globally complete state advances, and optimized reward never serves as sole release evidence.",
+          points: [
+            "Checkpoint manifests include optimizer, scheduler, scaler, RNG, data cursor, topology, code, and input releases; resharding validates target ownership before resume.",
+            "Evaluation combines deterministic task metrics, slice/safety suites, calibrated judge comparisons, blinded humans, reward-hacking probes, and serving benchmarks.",
+            "Promotion requires signed evidence and canary gates; rollback routes to a prior compatible bundle while preserving immutable campaign history.",
+          ],
+        },
+      ],
+      scaling: [
+        "Partition control-plane metadata by organization/project while scheduling shared accelerator pools through fair quotas and reservations.",
+        "Batch rollouts by pinned model profile and sampling shape; autoscale from queued token work while bounding policy staleness.",
+        "Store large datasets, generations, and shards in content-addressed object storage with manifests, lifecycle policy, and tenant encryption domains.",
+        "Place TP groups on fast local fabrics, compose PP/DP across topology, and checkpoint asynchronously without exposing incomplete state.",
+      ],
+      observability: [
+        "Dataset rejection, dedupe, contamination, policy/PII findings, slice balance, and transform lineage completeness.",
+        "Job queue age, accelerator utilization, per-rank step/collective/input wait, rollout tokens, policy staleness, and retries.",
+        "Loss, gradient norms, reward distribution, KL/drift, advantage statistics, reward-model disagreement, and truncation by slice.",
+        "Checkpoint duration/completeness, restore success, lost work, lineage gaps, and storage growth.",
+        "Capability/safety/human/judge gates, serving latency/cost, canary regression, rollback, and campaign cost by artifact.",
+      ],
+    },
+  },
+  {
+    id: "llm-generative-evaluation",
+    title: "Generative evaluation platform",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design a platform that compares prompts and generative-model releases across fixed suites, deterministic task metrics, human review, pairwise LLM judges, and live sampled traffic. Results must be reproducible, calibrated, slice-aware, and usable as release gates.",
+    requirementsToExplore: [
+      "Dataset, prompt, rubric, candidate, sampling, tool, and evaluator versioning.",
+      "Scalable generation, deterministic checks, pairwise judges, human annotation, and adjudication.",
+      "Judge calibration, position/verbosity bias, uncertainty, contamination, and regression detection.",
+      "Release gates, live sampling, privacy, cost, audit, and reproducible reports.",
+    ],
+    expectedTopics: [
+      "Immutable evaluation run manifest",
+      "Raw artifact retention and idempotent execution",
+      "Human-gold judge calibration and bias probes",
+      "Paired statistical comparison by critical slice",
+      "Separation of development, holdout, and live sets",
+    ],
+    commonFailureModes: [
+      "Comparing candidates generated with different prompts, tools, truncation, or sampling without recording them.",
+      "Using a single LLM judge score as ground truth without order swaps or human calibration.",
+      "Reporting aggregate wins while a critical safety or language slice regresses.",
+      "Leaking private test prompts or live user content into broad logs and development access.",
+    ],
+    followUpQuestions: [
+      "How do old reports behave after the judge model changes?",
+      "How do you handle nondeterministic candidate and judge outputs?",
+      "What prevents teams from training on release-gating holdouts?",
+      "How do you compare two models when many cases tie or judges disagree?",
+    ],
+    reference: {
+      scope: [
+        "Run offline and approved live-sample evaluations over text and structured outputs with deterministic, human, and model-based evaluators.",
+        "Produce immutable reports and policy-controlled release-gate decisions; do not expose sensitive test content to ordinary model-development roles.",
+        "Treat every model evaluator as a versioned measurement system that requires calibration for its intended tasks.",
+      ],
+      apis: [
+        "POST /v1/suites {caseManifest, slices, metrics, rubric, accessPolicy} -> suiteVersion",
+        "POST /v1/evaluations {suiteVersion, candidateBundles[], sampling, evaluatorBundle, repetitions} -> runId",
+        "GET /v1/evaluations/{runId} -> state, slice metrics, uncertainty, calibration, artifacts, and gate decision",
+        "POST /v1/annotations/tasks/{id} {label, confidence, rationale, rubricVersion} -> receipt",
+        "POST /v1/gates/{gateId}/evaluate {runIds, policyVersion} -> signed decision",
+      ],
+      dataModel: [
+        "EvalCase(caseId, suiteVersion, input, references, tool fixtures, sliceTags, sensitivity, expectedChecks)",
+        "CandidateBundle(model, prompt/template, tokenizer, tools, safety policy, serving config)",
+        "GenerationArtifact(run, case, candidate, seed/sampleIndex, raw output, trace, token/latency/cost, checksum)",
+        "JudgmentArtifact(pair, judge/prompt/rubric version, randomized order, verdict, rationale, confidence, repetition)",
+        "HumanLabel(case/pair, anonymized order, annotator pool, rubric version, label, adjudication)",
+        "EvaluationReport(runManifest, aggregate/slice results, intervals, calibration, exclusions, gatePolicy, decision)",
+      ],
+      architecture: [
+        "A suite registry stores encrypted immutable case manifests, slices, rubrics, access policy, and development/holdout designation.",
+        "An orchestrator expands a run into idempotent generation, deterministic checker, judge, and human-sampling tasks pinned to one manifest.",
+        "Workers call candidates through isolated adapters, capture raw outputs/traces/usage, and write content-addressed artifacts before task commit.",
+        "A judgment service randomizes order, repeats swap and rubric probes, and routes calibrated samples or disagreement to blinded human queues.",
+        "A statistics service computes paired deltas, confidence intervals, slice gates, multiple-comparison controls where appropriate, and a signed report.",
+      ],
+      invariants: [
+        "A report is recomputable from an immutable manifest that references exact raw generation and judgment artifacts plus cases, candidates, tools, evaluators, exclusions, and code. Re-executing a stochastic configuration creates a new repetition, not the same artifact.",
+        "Candidate identity and presentation order remain blinded wherever the protocol requires an unbiased comparison.",
+        "A judge result is interpreted only under a calibration record for the same judge/rubric/task regime.",
+        "Hard safety and critical-slice gates cannot be averaged away by aggregate quality improvements.",
+      ],
+      deepDives: [
+        {
+          title: "Run execution and nondeterminism",
+          summary: "Idempotent tasks retain repetitions rather than overwriting stochastic outputs.",
+          points: [
+            "Pin every semantic input and assign case × candidate × repetition identities; retries of an attempt do not create extra statistical samples.",
+            "Store raw outputs, structured traces, stop reasons, tokens, latency, tool fixture versions, and failure classifications before metrics are derived.",
+            "Use paired cases and matched sampling where defensible; report variance across generations rather than selecting the best output post hoc.",
+          ],
+        },
+        {
+          title: "Judge calibration protocol",
+          summary: "Calibration measures where automated verdicts match the intended human rubric and where they fail.",
+          points: [
+            "Sample representative and difficult slices for blinded expert labels, adjudicate disagreement, and freeze a human-gold calibration set.",
+            "Measure agreement/confusion, rank correlation, position-swap stability, verbosity and style sensitivity, rubric paraphrase, self-preference, and adversarial prompt injection.",
+            "Set use thresholds by task and impact; route low-confidence/disagreement cases to humans and version a new metric when judge or prompt changes.",
+          ],
+        },
+        {
+          title: "Regression and gate semantics",
+          summary: "Release decisions combine paired evidence, uncertainty, hard constraints, and slice policy.",
+          points: [
+            "Compute paired win/loss/tie or metric deltas per case, bootstrap confidence intervals, and minimum effect thresholds against a declared baseline.",
+            "Require non-inferiority on protected capability/safety slices and absolute hard gates for severe violations, independent of overall win rate.",
+            "Backfill candidate reports under a new evaluator version before comparing trends; retain old reports as immutable historical measurements.",
+          ],
+        },
+      ],
+      scaling: [
+        "Expand run DAGs into idempotent tasks partitioned by access class, candidate profile, and evaluator; enforce tenant/team quotas and spend reservations.",
+        "Batch compatible generation and judge calls while retaining per-sample identity, deadlines, and cancellation.",
+        "Store artifacts content-addressed with retention by sensitivity; cache only exact version-compatible generation or judgment results.",
+        "Use stratified human sampling and active disagreement queues to spend annotation budget on calibration and consequential uncertainty.",
+      ],
+      observability: [
+        "Run completeness, retries, exclusions, timeouts, invalid outputs, token/latency/cost, and artifact lineage gaps.",
+        "Aggregate and slice deltas with support, confidence intervals, effect size, ties, and gate margin.",
+        "Judge-human agreement, confusion, swap stability, verbosity/style sensitivity, rubric drift, and disagreement queues.",
+        "Annotator agreement, adjudication rate, task age, gold checks, and representation by expertise/language.",
+        "Holdout access, contamination signals, sensitive-content policy violations, report backfills, and gate overrides with audit." ,
+      ],
+    },
+  },
+  {
+    id: "llm-preference-arena",
+    title: "Human-preference collection and arena",
+    category: "llm",
+    difficulty: "hard",
+    durationMinutes: 45,
+    prompt:
+      "Design a preference platform where users or trained annotators compare two anonymous model responses. It should collect high-quality pairwise data, publish statistically defensible rankings, resist abuse and position bias, and export governed training datasets.",
+    requirementsToExplore: [
+      "Prompt intake, eligibility, candidate sampling, blind randomization, response generation, and vote collection.",
+      "Annotator quality, consent, privacy, abuse, bot detection, conflict of interest, and adjudication.",
+      "Pair scheduling, overlap, Elo or Bradley–Terry-style ranking, uncertainty, ties, drift, and slice reporting.",
+      "Immutable dataset releases, provenance, deletion/retention, model disclosure, and training export.",
+    ],
+    expectedTopics: [
+      "Blind pair assignment and presentation randomization",
+      "Model/version and sampling identity",
+      "Annotator reliability without suppressing valid minority preferences",
+      "Connected comparison graph and uncertainty-aware ranking",
+      "Consent and provenance for training export",
+    ],
+    commonFailureModes: [
+      "Showing model identity or consistently assigning one model to the same side.",
+      "Publishing a point ranking without support, uncertainty, population, or time window.",
+      "Letting one user, model provider, or bot farm dominate comparisons.",
+      "Exporting conversations for training without consent, deletion handling, or immutable provenance.",
+    ],
+    followUpQuestions: [
+      "How do you compare a newly added model with little overlap?",
+      "How do rankings adapt when models and user preferences change over time?",
+      "How do you detect a provider trying to manipulate its own rank?",
+      "What happens when an annotator asks to delete their data after a dataset release?",
+    ],
+    reference: {
+      scope: [
+        "Support public-user and controlled-expert pairwise comparisons with distinct consent, retention, quality, and weighting policies.",
+        "Generate anonymous candidate pairs, collect vote/tie/invalid outcomes, estimate rankings with uncertainty, and publish governed preference releases.",
+        "Do not claim a universal model ordering; every result belongs to a population, prompt distribution, slice, policy, and time window.",
+      ],
+      apis: [
+        "POST /v1/battles {prompt, cohort, consent, filters} -> battleId and streamed anonymous responses A/B",
+        "POST /v1/battles/{id}/vote {choice: A|B|tie|both_bad, reasonCodes, clientNonce} -> receipt and optional reveal",
+        "GET /v1/leaderboards/{boardId}?window=...&slice=... -> estimates, intervals, support, policy, and model disclosures",
+        "POST /v1/annotations/claim {expertise, locale} -> blinded task",
+        "POST /v1/datasets/releases {selectionPolicy, consentClass, redaction, cutoff} -> immutable release manifest",
+      ],
+      dataModel: [
+        "PromptRecord(promptId, source/cohort, consent, locale/domain, sensitivity, policyVersion, createdAt)",
+        "BattleAssignment(battleId, promptId, modelRevisionA/B, samplingA/B, randomizedPresentation, assignmentPropensity, policyEpoch)",
+        "ResponseArtifact(battleId, hiddenCandidate, output, stopReason, token/latency/cost, safety flags, checksum)",
+        "Vote(voteId, battleId, actorPseudonym, choice, reasonCodes, submittedAt, quality/abuse state, clientNonce)",
+        "RankingSnapshot(board, population, timeWindow, model set, estimator version, scores, covariance/intervals, support graph)",
+        "PreferenceRelease(id, prompt/battle/vote membership, consent/redaction policy, model disclosure, transforms, deletion policy)",
+      ],
+      architecture: [
+        "An intake service applies safety, PII, consent, and eligibility policy, then a pair scheduler samples models under exploration and overlap constraints.",
+        "A generation broker sends the same normalized prompt to pinned model profiles, stores artifacts, and randomizes anonymous A/B presentation independently per battle.",
+        "A vote service enforces one idempotent vote per assignment/actor policy, captures ties and invalid outcomes, and emits to an append-only event log.",
+        "Quality and abuse pipelines compute bot/collusion/rate/anomaly signals and maintain auditable inclusion weights or quarantine without rewriting raw votes.",
+        "A ranking service fits versioned pairwise models, bootstraps uncertainty, monitors graph connectivity and drift, and publishes population/slice snapshots; a data service creates governed exports.",
+      ],
+      invariants: [
+        "Voters cannot see model identity before a vote, and left/right presentation is randomized and recorded.",
+        "Each included comparison maps to exact prompt, candidate revisions, sampling profiles, response artifacts, actor policy, and assignment propensity.",
+        "Published rankings declare population, time window, estimator, support, uncertainty, and exclusions; unsupported pairs are not presented as certain orderings.",
+        "Training exports contain only consent-compatible, policy-approved records and preserve deletions or legal retention through explicit release semantics.",
+      ],
+      deepDives: [
+        {
+          title: "Pair scheduling and identifiability",
+          summary: "The comparison graph needs overlap while still exploring new and uncertain candidates.",
+          points: [
+            "Balance traffic across strong anchors, adjacent-score pairs, new models, rare slices, and random exploration; record assignment propensity for bias analysis.",
+            "Prevent provider or user choice from deterministically selecting favorable opponents. Cap exposure and ensure the model graph remains connected in each reported population.",
+            "Use stable model revisions and comparable generation policies within a board; create new epochs when material policy changes prevent direct longitudinal interpretation.",
+          ],
+        },
+        {
+          title: "Vote quality and abuse",
+          summary: "Quality control distinguishes noise, systematic manipulation, and legitimate heterogeneous preferences.",
+          points: [
+            "Use rate limits, device/account risk, duplicate patterns, impossible timing, collusion graphs, hidden gold/duplicate tasks for experts, and reason-code consistency as signals.",
+            "Quarantine or downweight through a versioned policy with audit and appeals; retain raw events. Do not erase a language or demographic preference merely because it differs from the majority.",
+            "Stratify expert and public populations rather than mixing incompatible sampling and incentives into one opaque score.",
+          ],
+        },
+        {
+          title: "Ranking, uncertainty, and drift",
+          summary: "A leaderboard is an estimate over pair outcomes, not a count of raw wins.",
+          points: [
+            "Use a pinned Bradley–Terry-family model with an explicit tie extension such as Davidson, or a pinned Elo update rule; disclose Elo order/K-factor dependence and probe non-transitive preferences. Cluster uncertainty resampling at independent prompt and voter units rather than treating votes as i.i.d.",
+            "Publish overall and predeclared slice rankings only when the comparison graph and sample sizes support them; expose instability rather than forcing a total order.",
+            "Use rolling windows and fixed anchor sets to detect population/model drift; retain immutable historical snapshots instead of retroactively rewriting boards.",
+          ],
+        },
+      ],
+      scaling: [
+        "Partition battle and vote writes by assignment ID; stream immutable events to abuse, ranking, and dataset consumers with idempotent offsets.",
+        "Use per-model/tenant concurrency and token budgets in the generation broker so pair sampling does not overload a candidate.",
+        "Incrementally update provisional estimates but periodically recompute authoritative snapshots from the included event manifest.",
+        "Sample expensive expert review toward disagreement, sparse slices, safety cases, and high-leverage edges in the comparison graph.",
+      ],
+      observability: [
+        "Battle assignment by model pair, side, prompt slice, propensity, generation failure, latency, and cost.",
+        "Vote rate, tie/both-bad/skip, side preference, duplicate/idempotency conflict, and completion time by population.",
+        "Abuse risk, quarantine/weight changes, collusion clusters, gold/duplicate agreement, appeals, and policy version.",
+        "Comparison graph degree/connectivity, effective sample size, score interval width, rank stability, and slice/time drift.",
+        "Consent class, redaction/deletion backlog, release lineage, access audits, and training-export policy violations.",
+      ],
+    },
+  },
+];

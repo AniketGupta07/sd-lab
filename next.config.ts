@@ -1,9 +1,5 @@
 import type { NextConfig } from "next";
-
-const repositoryName = process.env.GITHUB_REPOSITORY?.split("/")[1];
-const basePath = process.env.GITHUB_ACTIONS === "true" && repositoryName
-  ? `/${repositoryName}`
-  : "";
+import { basePath } from "./basePath";
 
 const nextConfig: NextConfig = {
   output: "export",

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { basePath } from "../basePath";
 import "./globals.css";
 
 const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000").replace(/\/$/, "");
@@ -21,9 +22,11 @@ export const metadata: Metadata = {
   description:
     "An eight-week active-recall workspace for distributed systems, ML system design, LLM infrastructure, estimation, and timed interview practice.",
   alternates: { canonical: siteUrl },
+  // Next does not apply basePath to metadata icons, so prepend it here. Building
+  // these from NEXT_PUBLIC_SITE_URL instead would point non-CI builds at localhost.
   icons: {
-    icon: `${siteUrl}/favicon.svg`,
-    shortcut: `${siteUrl}/favicon.svg`,
+    icon: `${basePath}/favicon.svg`,
+    shortcut: `${basePath}/favicon.svg`,
   },
   openGraph: {
     type: "website",

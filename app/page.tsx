@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
+  allTopics,
   curriculumWeeks,
   designPrompts,
   estimationDrills,
   interviewPhases,
   mistakeCategories,
   standardQuestions,
-  weekOneTopics,
+  type DesignCategory,
   type DesignPrompt,
   type MistakeCategory,
 } from "./studyData";
@@ -172,7 +173,7 @@ function defaultState(): StudyState {
   return {
     version: 1,
     topics: Object.fromEntries(
-      weekOneTopics.map((topic) => [
+      allTopics.map((topic) => [
         topic.id,
         { status: "not-started", confidence: 3, notes: "" },
       ]),
@@ -233,26 +234,114 @@ function averageScore(scores: Record<ScoreField, number>) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function resolveContentLabel(value: string) {
+  return allTopics.find((topic) => topic.id === value)?.title
+    ?? designPrompts.find((prompt) => prompt.id === value)?.title
+    ?? value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeFields(value: unknown): Record<PracticeField, string> {
+  const fields = emptyFields();
+  if (!isRecord(value)) return fields;
+  for (const field of practiceFields) {
+    const savedField = value[field.id];
+    if (typeof savedField === "string") fields[field.id] = savedField;
+  }
+  return fields;
+}
+
+function normalizeScores(value: unknown): Record<ScoreField, number> {
+  const scores = defaultScores();
+  if (!isRecord(value)) return scores;
+  for (const field of scoreFields) {
+    const score = value[field.id];
+    if (typeof score === "number" && Number.isFinite(score)) {
+      scores[field.id] = Math.max(1, Math.min(5, Math.round(score)));
+    }
+  }
+  return scores;
+}
+
+function normalizeDraft(value: unknown): PracticeDraft {
+  const raw = isRecord(value) ? value : {};
+  const prompt = designPrompts.find((item) => item.id === raw.promptId) ?? designPrompts[0];
+  const fallback = makeDraft(prompt);
+  const seconds = typeof raw.secondsRemaining === "number" && Number.isFinite(raw.secondsRemaining)
+    ? Math.max(0, Math.round(raw.secondsRemaining))
+    : fallback.secondsRemaining;
+  return {
+    ...fallback,
+    id: typeof raw.id === "string" ? raw.id : fallback.id,
+    startedAt: typeof raw.startedAt === "string" ? raw.startedAt : fallback.startedAt,
+    deadline: typeof raw.deadline === "number" && Number.isFinite(raw.deadline) ? raw.deadline : null,
+    secondsRemaining: seconds,
+    fields: normalizeFields(raw.fields),
+    scores: normalizeScores(raw.scores),
+  };
+}
+
+function normalizeAttempt(value: unknown): SavedAttempt | null {
+  if (!isRecord(value) || !designPrompts.some((prompt) => prompt.id === value.promptId)) return null;
+  const draft = normalizeDraft(value);
+  return {
+    ...draft,
+    savedAt: typeof value.savedAt === "string" ? value.savedAt : draft.startedAt,
+    durationMinutes: typeof value.durationMinutes === "number" && Number.isFinite(value.durationMinutes)
+      ? Math.max(1, Math.round(value.durationMinutes))
+      : 1,
+  };
+}
+
 function mergeStoredState(raw: string): StudyState {
   const fallback = defaultState();
   try {
-    const saved = JSON.parse(raw) as Partial<StudyState>;
-    if (saved.version !== 1) return fallback;
-    const savedTopics = saved.topics && typeof saved.topics === "object" ? saved.topics : {};
+    const saved: unknown = JSON.parse(raw);
+    if (!isRecord(saved) || saved.version !== 1) return fallback;
+    const savedTopics = isRecord(saved.topics) ? saved.topics : {};
     return {
-      ...fallback,
-      ...saved,
       version: 1,
       topics: Object.fromEntries(
-        weekOneTopics.map((topic) => [
-          topic.id,
-          { ...fallback.topics[topic.id], ...(savedTopics[topic.id] ?? {}) },
-        ]),
+        allTopics.map((topic) => {
+          const savedTopic = savedTopics[topic.id];
+          const rawTopic: Record<string, unknown> = isRecord(savedTopic) ? savedTopic : {};
+          const status = rawTopic.status === "in-progress" || rawTopic.status === "completed"
+            ? rawTopic.status
+            : "not-started";
+          const confidence = typeof rawTopic.confidence === "number" && Number.isFinite(rawTopic.confidence)
+            ? Math.max(1, Math.min(5, Math.round(rawTopic.confidence)))
+            : fallback.topics[topic.id].confidence;
+          return [topic.id, {
+            status,
+            confidence,
+            notes: typeof rawTopic.notes === "string" ? rawTopic.notes : "",
+            ...(typeof rawTopic.lastReviewedAt === "string" ? { lastReviewedAt: rawTopic.lastReviewedAt } : {}),
+          }];
+        }),
       ),
-      mistakes: Array.isArray(saved.mistakes) ? saved.mistakes : [],
-      attempts: Array.isArray(saved.attempts) ? saved.attempts : [],
-      activityDates: Array.isArray(saved.activityDates) ? saved.activityDates : [],
-      draft: saved.draft?.fields && saved.draft?.scores ? saved.draft : fallback.draft,
+      generalNotes: typeof saved.generalNotes === "string" ? saved.generalNotes : "",
+      mistakes: Array.isArray(saved.mistakes) ? saved.mistakes.filter((item): item is Mistake => {
+        if (!isRecord(item)) return false;
+        return typeof item.id === "string"
+          && typeof item.date === "string"
+          && typeof item.designProblemId === "string"
+          && mistakeCategories.includes(item.category as MistakeCategory)
+          && typeof item.mistake === "string"
+          && typeof item.correctApproach === "string"
+          && typeof item.reviewDate === "string"
+          && typeof item.resolved === "boolean";
+      }) : [],
+      attempts: Array.isArray(saved.attempts)
+        ? saved.attempts.map(normalizeAttempt).filter((item): item is SavedAttempt => item !== null)
+        : [],
+      activityDates: Array.isArray(saved.activityDates)
+        ? saved.activityDates.filter((item): item is string => typeof item === "string")
+        : [],
+      theme: saved.theme === "dark" ? "dark" : "light",
+      draft: normalizeDraft(saved.draft),
     };
   } catch {
     return fallback;
@@ -269,7 +358,8 @@ export default function Home() {
   const [view, setView] = useState<View>("dashboard");
   const [study, setStudy] = useState<StudyState>(defaultState);
   const [hydrated, setHydrated] = useState(false);
-  const [activeTopicId, setActiveTopicId] = useState(weekOneTopics[0].id);
+  const [activeTopicId, setActiveTopicId] = useState(allTopics[0].id);
+  const [topicWeek, setTopicWeek] = useState(1);
   const [activeDrillIndex, setActiveDrillIndex] = useState(0);
   const [drillAnswer, setDrillAnswer] = useState("");
   const [drillRevealed, setDrillRevealed] = useState(false);
@@ -277,6 +367,9 @@ export default function Home() {
   const [saveNotice, setSaveNotice] = useState("");
   const [mockPrompt, setMockPrompt] = useState<DesignPrompt>(designPrompts[0]);
   const [mockChecks, setMockChecks] = useState<Record<string, boolean>>({});
+  const [practiceCategory, setPracticeCategory] = useState<DesignCategory>("classic");
+  const [referenceRevealed, setReferenceRevealed] = useState(false);
+  const [quizAnswers, setQuizAnswers] = useState<Record<string, Record<number, number>>>({});
   const [mistakeForm, setMistakeForm] = useState({
     category: mistakeCategories[0] as MistakeCategory,
     mistake: "",
@@ -285,22 +378,44 @@ export default function Home() {
   });
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    const next = stored ? mergeStoredState(stored) : defaultState();
-    if (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches) next.theme = "dark";
-    setStudy(next);
-    setSecondsLeft(
-      next.draft.deadline
-        ? Math.max(0, Math.ceil((next.draft.deadline - Date.now()) / 1000))
-        : next.draft.secondsRemaining,
-    );
-    setHydrated(true);
+    const hydrationTimer = window.setTimeout(() => {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      const next = stored ? mergeStoredState(stored) : defaultState();
+      const restoredPrompt = designPrompts.find((prompt) => prompt.id === next.draft.promptId);
+      const nextTopic = allTopics.find((topic) => next.topics[topic.id]?.status !== "completed") ?? allTopics[allTopics.length - 1];
+      if (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches) next.theme = "dark";
+      setStudy(next);
+      if (restoredPrompt) setPracticeCategory(restoredPrompt.category);
+      if (nextTopic) {
+        setActiveTopicId(nextTopic.id);
+        setTopicWeek(nextTopic.week);
+      }
+      setSecondsLeft(
+        next.draft.deadline
+          ? Math.max(0, Math.ceil((next.draft.deadline - Date.now()) / 1000))
+          : next.draft.secondsRemaining,
+      );
+      setHydrated(true);
+    }, 0);
 
     const sync = (event: StorageEvent) => {
-      if (event.key === STORAGE_KEY && event.newValue) setStudy(mergeStoredState(event.newValue));
+      if (event.key !== STORAGE_KEY) return;
+      const next = event.newValue ? mergeStoredState(event.newValue) : defaultState();
+      const prompt = designPrompts.find((item) => item.id === next.draft.promptId) ?? designPrompts[0];
+      setStudy(next);
+      setPracticeCategory(prompt.category);
+      setReferenceRevealed(false);
+      setSecondsLeft(
+        next.draft.deadline
+          ? Math.max(0, Math.ceil((next.draft.deadline - Date.now()) / 1000))
+          : next.draft.secondsRemaining,
+      );
     };
     window.addEventListener("storage", sync);
-    return () => window.removeEventListener("storage", sync);
+    return () => {
+      window.clearTimeout(hydrationTimer);
+      window.removeEventListener("storage", sync);
+    };
   }, []);
 
   useEffect(() => {
@@ -337,17 +452,25 @@ export default function Home() {
     return () => window.clearInterval(interval);
   }, [study.draft.deadline]);
 
-  const completedTopics = useMemo(
-    () => weekOneTopics.filter((topic) => study.topics[topic.id]?.status === "completed").length,
+  const totalCompletedTopics = useMemo(
+    () => allTopics.filter((topic) => study.topics[topic.id]?.status === "completed").length,
     [study.topics],
   );
-  const progressPercent = Math.round((completedTopics / weekOneTopics.length) * 100);
+  const overallProgressPercent = Math.round((totalCompletedTopics / allTopics.length) * 100);
+  const currentWeek = curriculumWeeks.find((week) =>
+    allTopics.some((topic) => topic.week === week.week && study.topics[topic.id]?.status !== "completed"),
+  ) ?? curriculumWeeks[curriculumWeeks.length - 1];
+  const currentWeekTopics = allTopics.filter((topic) => topic.week === currentWeek.week);
+  const completedWeekTopics = currentWeekTopics.filter((topic) => study.topics[topic.id]?.status === "completed").length;
+  const weekProgressPercent = Math.round((completedWeekTopics / currentWeekTopics.length) * 100);
   const streak = useMemo(() => calculateStreak(study.activityDates), [study.activityDates]);
-  const activeTopic = weekOneTopics.find((topic) => topic.id === activeTopicId) ?? weekOneTopics[0];
+  const activeTopic = allTopics.find((topic) => topic.id === activeTopicId) ?? allTopics[0];
+  const visibleTopicWeek = allTopics.filter((topic) => topic.week === topicWeek);
   const activeDrill = estimationDrills[activeDrillIndex];
   const activePrompt = designPrompts.find((prompt) => prompt.id === study.draft.promptId) ?? designPrompts[0];
+  const visiblePrompts = designPrompts.filter((prompt) => prompt.category === practiceCategory);
   const unresolvedMistakes = study.mistakes.filter((mistake) => !mistake.resolved);
-  const weakTopics = weekOneTopics.filter((topic) => {
+  const weakTopics = allTopics.filter((topic) => {
     const progress = study.topics[topic.id];
     return progress?.confidence <= 2 && progress.status !== "completed";
   });
@@ -377,6 +500,8 @@ export default function Home() {
   }
 
   function openTopic(topicId: string) {
+    const topic = allTopics.find((item) => item.id === topicId);
+    if (topic) setTopicWeek(topic.week);
     setActiveTopicId(topicId);
     selectView("topic");
   }
@@ -388,6 +513,8 @@ export default function Home() {
   }
 
   function choosePractice(prompt: DesignPrompt, fresh = true) {
+    setPracticeCategory(prompt.category);
+    setReferenceRevealed(false);
     setStudy((current) => ({
       ...current,
       draft: fresh ? makeDraft(prompt, newId("attempt")) : current.draft,
@@ -395,6 +522,36 @@ export default function Home() {
     setSecondsLeft(prompt.durationMinutes * 60);
     setSaveNotice("");
     selectView("practice");
+  }
+
+  function chooseTopicWeek(week: number) {
+    const firstTopic = allTopics.find((topic) => topic.week === week);
+    if (!firstTopic) return;
+    setTopicWeek(week);
+    setActiveTopicId(firstTopic.id);
+  }
+
+  function answerQuiz(topicId: string, questionIndex: number, optionIndex: number) {
+    setQuizAnswers((current) => ({
+      ...current,
+      [topicId]: { ...(current[topicId] ?? {}), [questionIndex]: optionIndex },
+    }));
+  }
+
+  function openTopicExercise() {
+    if (activeTopic.id === "estimation") {
+      selectView("drills");
+      return;
+    }
+    const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const related = activeTopic.relatedDesigns.map(normalize);
+    const matched = designPrompts.find((prompt) => {
+      const title = normalize(prompt.title);
+      const id = normalize(prompt.id);
+      return related.some((candidate) => candidate.includes(title) || title.includes(candidate) || candidate.includes(id) || id.includes(candidate));
+    });
+    const fallbackCategory: DesignCategory = activeTopic.tier <= 1 ? "classic" : activeTopic.tier === 2 ? "ml" : "llm";
+    choosePractice(matched ?? designPrompts.find((prompt) => prompt.category === fallbackCategory) ?? designPrompts[0]);
   }
 
   function toggleTimer() {
@@ -460,9 +617,13 @@ export default function Home() {
   }
 
   function reopenAttempt(attempt: SavedAttempt) {
+    const prompt = designPrompts.find((item) => item.id === attempt.promptId) ?? designPrompts[0];
     setStudy((current) => ({ ...current, draft: { ...attempt, deadline: null } }));
     setSecondsLeft(attempt.secondsRemaining);
-    setView("practice");
+    setPracticeCategory(prompt.category);
+    setReferenceRevealed(false);
+    setSaveNotice("Saved attempt reopened. Editing it will not replace the saved copy until you save again.");
+    selectView("practice");
   }
 
   function addMistake() {
@@ -523,38 +684,52 @@ export default function Home() {
     fresh.theme = study.theme;
     setStudy(fresh);
     setSecondsLeft(fresh.draft.secondsRemaining);
+    setPracticeCategory(designPrompts[0].category);
+    setReferenceRevealed(false);
+    setQuizAnswers({});
     setSaveNotice("Local study data reset.");
   }
 
   function renderDashboard() {
-    const dueTopics = weekOneTopics.filter((topic) => study.topics[topic.id]?.status !== "completed").slice(0, 3);
+    const dueTopics = currentWeekTopics.filter((topic) => study.topics[topic.id]?.status !== "completed").slice(0, 3);
+    const targetCategory: DesignCategory | null = currentWeek.week <= 4
+      ? "classic"
+      : currentWeek.week <= 6
+        ? "ml"
+        : currentWeek.week === 7
+          ? "llm"
+          : null;
+    const nextPromptPool = targetCategory
+      ? designPrompts.filter((prompt) => prompt.category === targetCategory)
+      : designPrompts;
+    const nextPrompt = nextPromptPool[study.attempts.length % nextPromptPool.length] ?? designPrompts[0];
+    const dueMinutes = dueTopics.reduce((sum, topic) => sum + topic.estimatedMinutes, 0);
     const latestAttempt = study.attempts[0];
     return (
       <>
         <section className="hero-grid" aria-labelledby="dashboard-title">
           <div className="hero-copy">
-            <p className="eyebrow">Week 01 · Foundations</p>
+            <p className="eyebrow">Week {String(currentWeek.week).padStart(2, "0")} · Tier {currentWeek.tier}</p>
             <h1 id="dashboard-title">Turn technical depth into interview signal.</h1>
             <p className="hero-lede">
-              Build the habit of estimating first, stating assumptions aloud, and defending every trade-off.
-              Today&apos;s work is intentionally small enough to finish.
+              {currentWeek.focus} Build the habit of stating assumptions aloud and defending every trade-off.
             </p>
             <div className="hero-actions">
-              <button className="button primary" onClick={() => openTopic(dueTopics[0]?.id ?? weekOneTopics[0].id)}>
+              <button className="button primary" onClick={() => openTopic(dueTopics[0]?.id ?? currentWeekTopics[0].id)}>
                 Start today&apos;s study
               </button>
-              <button className="button quiet" onClick={() => choosePractice(designPrompts[0])}>
+              <button className="button quiet" onClick={() => choosePractice(nextPrompt)}>
                 Run a 40-min design
               </button>
             </div>
           </div>
 
-          <div className="progress-seal" style={{ "--progress": `${progressPercent * 3.6}deg` } as CSSProperties}>
+          <div className="progress-seal" style={{ "--progress": `${weekProgressPercent * 3.6}deg` } as CSSProperties}>
             <div className="progress-seal-inner">
-              <strong>{progressPercent}%</strong>
-              <span>Week 1</span>
+              <strong>{weekProgressPercent}%</strong>
+              <span>Week {currentWeek.week}</span>
             </div>
-            <p>{completedTopics} of {weekOneTopics.length} sessions complete</p>
+            <p>{completedWeekTopics} of {currentWeekTopics.length} modules complete</p>
           </div>
         </section>
 
@@ -588,7 +763,7 @@ export default function Home() {
                 <p className="eyebrow">Study ledger</p>
                 <h2 id="today-heading">Due today</h2>
               </div>
-              <span className="section-note">~3 hours total</span>
+              <span className="section-note">{dueMinutes ? `~${Math.max(1, Math.round(dueMinutes / 60))} hours total` : "Week complete"}</span>
             </div>
             <div className="task-list">
               {dueTopics.length ? dueTopics.map((topic, index) => (
@@ -610,8 +785,8 @@ export default function Home() {
                 </article>
               )) : (
                 <div className="empty-state">
-                  <strong>Week 1 complete.</strong>
-                  <p>Use the design practice to consolidate what you learned.</p>
+                  <strong>Week {currentWeek.week} complete.</strong>
+                  <p>Use a timed design to consolidate the week before moving on.</p>
                 </div>
               )}
             </div>
@@ -619,12 +794,12 @@ export default function Home() {
 
           <aside className="practice-ticket" aria-labelledby="next-practice-heading">
             <p className="eyebrow inverted">Next full design</p>
-            <h2 id="next-practice-heading">URL shortener</h2>
-            <p>Low-latency redirects, ID generation, hot links, expiration, analytics, and abuse prevention.</p>
+            <h2 id="next-practice-heading">{nextPrompt.title}</h2>
+            <p>{nextPrompt.prompt}</p>
             <div className="ticket-meta">
-              <span>Classic</span><span>Medium</span><span>40 min</span>
+              <span>{nextPrompt.category}</span><span>{nextPrompt.difficulty}</span><span>{nextPrompt.durationMinutes} min</span>
             </div>
-            <button className="button light" onClick={() => choosePractice(designPrompts[0])}>Open practice room</button>
+            <button className="button light" onClick={() => choosePractice(nextPrompt)}>Open practice room</button>
           </aside>
 
           <section className="paper-panel framework-panel" aria-labelledby="framework-heading">
@@ -698,44 +873,46 @@ export default function Home() {
             <p className="eyebrow">Eight-week program</p>
             <h1 id="curriculum-title">A deliberate path from fundamentals to mocks.</h1>
           </div>
-          <p>Two full designs, three component drills, and one review loop each week. Later weeks shift the balance toward spoken, timed practice.</p>
+          <p>{allTopics.length} senior-level modules with mechanisms, failure diagnosis, decision rules, quizzes, and {designPrompts.length} full design rooms.</p>
         </div>
 
         <div className="week-list">
-          {curriculumWeeks.map((week) => (
-            <details className="week-row" key={week.week} open={week.week === 1}>
-              <summary>
-                <span className="week-number">W{String(week.week).padStart(2, "0")}</span>
-                <span className="week-title">
-                  <small>Tier {week.tier}</small>
-                  <strong>{week.title}</strong>
-                </span>
-                <span className="week-hours">{week.hours}</span>
-              </summary>
-              <div className="week-content">
-                <p>{week.focus}</p>
-                <div>
-                  <span className="mini-label">Concepts</span>
-                  <ul className="tag-list">{week.topics.map((topic) => <li key={topic}>{topic}</li>)}</ul>
-                </div>
-                <div>
-                  <span className="mini-label">Full designs</span>
-                  <ul className="plain-list">{week.designs.map((design) => <li key={design}>{design}</li>)}</ul>
-                </div>
-                {week.week === 1 && (
+          {curriculumWeeks.map((week) => {
+            const weekTopics = allTopics.filter((topic) => topic.week === week.week);
+            const finished = weekTopics.filter((topic) => study.topics[topic.id]?.status === "completed").length;
+            return (
+              <details className="week-row" key={week.week} open={week.week === currentWeek.week}>
+                <summary>
+                  <span className="week-number">W{String(week.week).padStart(2, "0")}</span>
+                  <span className="week-title">
+                    <small>Tier {week.tier} · {finished}/{weekTopics.length} complete</small>
+                    <strong>{week.title}</strong>
+                  </span>
+                  <span className="week-hours">{week.hours}</span>
+                </summary>
+                <div className="week-content">
+                  <p>{week.focus}</p>
+                  <div>
+                    <span className="mini-label">Concepts</span>
+                    <ul className="tag-list">{week.topics.map((topic) => <li key={topic}>{topic}</li>)}</ul>
+                  </div>
+                  <div>
+                    <span className="mini-label">Full designs</span>
+                    <ul className="plain-list">{week.designs.map((design) => <li key={design}>{design}</li>)}</ul>
+                  </div>
                   <div className="week-one-grid">
-                    {weekOneTopics.map((topic) => (
+                    {weekTopics.map((topic) => (
                       <button key={topic.id} onClick={() => openTopic(topic.id)}>
-                        <span>Day {topic.day}</span>
+                        <span>Module {topic.day}</span>
                         <strong>{topic.title}</strong>
                         <small>{study.topics[topic.id]?.status.replace("-", " ")} · {topic.estimatedMinutes} min</small>
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
-            </details>
-          ))}
+                </div>
+              </details>
+            );
+          })}
         </div>
       </section>
     );
@@ -745,24 +922,42 @@ export default function Home() {
     const topicProgress = study.topics[activeTopic.id];
     return (
       <section aria-labelledby="topic-title">
-        <div className="topic-picker" aria-label="Week 1 topics">
-          {weekOneTopics.map((topic) => (
+        <div className="topic-week-tabs" aria-label="Curriculum week">
+          {curriculumWeeks.map((week) => (
+            <button
+              key={week.week}
+              className={week.week === topicWeek ? "active" : ""}
+              onClick={() => chooseTopicWeek(week.week)}
+              aria-pressed={week.week === topicWeek}
+            >
+              <span>W{String(week.week).padStart(2, "0")}</span>
+              <strong>{week.title}</strong>
+            </button>
+          ))}
+        </div>
+
+        <div className="topic-picker" aria-label={`Week ${topicWeek} modules`}>
+          {visibleTopicWeek.map((topic) => (
             <button
               key={topic.id}
               className={topic.id === activeTopic.id ? "active" : ""}
               onClick={() => setActiveTopicId(topic.id)}
               aria-pressed={topic.id === activeTopic.id}
             >
-              <span>D{topic.day}</span>{topic.title}
+              <span>M{topic.day}</span>{topic.title}
             </button>
           ))}
         </div>
 
         <div className="topic-header">
           <div>
-            <p className="eyebrow">Day {activeTopic.day} · {activeTopic.estimatedMinutes} minutes</p>
+            <p className="eyebrow">Week {activeTopic.week} · Module {activeTopic.day} · {activeTopic.estimatedMinutes} minutes</p>
             <h1 id="topic-title">{activeTopic.title}</h1>
             <p>{activeTopic.summary}</p>
+            <div className="topic-context">
+              <span>Prerequisites: {activeTopic.prerequisites.map(resolveContentLabel).join(" · ")}</span>
+              <span>Related: {activeTopic.relatedDesigns.map(resolveContentLabel).join(" · ")}</span>
+            </div>
           </div>
           <div className="topic-controls">
             <span className="mini-label">Confidence</span>
@@ -785,6 +980,10 @@ export default function Home() {
         </div>
 
         <div className="topic-grid">
+          <article className="topic-why topic-wide">
+            <p className="eyebrow inverted">Why senior interviewers care</p>
+            <h2>{activeTopic.whyItMatters}</h2>
+          </article>
           <article className="paper-panel">
             <p className="eyebrow">Learning objectives</p>
             <ul className="number-list">
@@ -795,24 +994,114 @@ export default function Home() {
             <p className="eyebrow">Core concepts</p>
             <ul className="tag-list large">{activeTopic.concepts.map((item) => <li key={item}>{item}</li>)}</ul>
           </article>
-          <article className="paper-panel">
+
+          <article className="paper-panel topic-wide deep-dive-panel">
+            <div className="section-heading">
+              <div><p className="eyebrow">Mechanics</p><h2>What happens under the hood</h2></div>
+              <span className="section-note">Explain, don&apos;t name-drop</span>
+            </div>
+            <div className="deep-dive-list">
+              {activeTopic.deepDive.map((section, index) => (
+                <details key={section.title} open={index === 0}>
+                  <summary><span>{String(index + 1).padStart(2, "0")}</span><strong>{section.title}</strong></summary>
+                  <p>{section.summary}</p>
+                  <ul>{section.points.map((point) => <li key={point}>{point}</li>)}</ul>
+                </details>
+              ))}
+            </div>
+          </article>
+
+          <article className="paper-panel topic-wide">
             <p className="eyebrow">Trade-offs to say aloud</p>
-            <ul className="arrow-list">{activeTopic.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>
+            <div className="tradeoff-table">
+              {activeTopic.tradeoffs.map((item) => (
+                <div key={item.decision}>
+                  <strong>{item.decision}</strong>
+                  <p><span>A</span>{item.preferA}</p>
+                  <p><span>B</span>{item.preferB}</p>
+                  <small>Watch: {item.watch}</small>
+                </div>
+              ))}
+            </div>
           </article>
-          <article className="paper-panel danger-paper">
-            <p className="eyebrow">Failure modes</p>
-            <ul className="arrow-list">{activeTopic.failureModes.map((item) => <li key={item}>{item}</li>)}</ul>
+
+          <article className="paper-panel danger-paper topic-wide">
+            <p className="eyebrow">Failure diagnosis</p>
+            <div className="failure-grid">
+              {activeTopic.failureModes.map((item) => (
+                <div key={item.mode}>
+                  <strong>{item.mode}</strong>
+                  <p><span>Signal</span>{item.symptom}</p>
+                  <p><span>Mitigation</span>{item.mitigation}</p>
+                </div>
+              ))}
+            </div>
           </article>
+
           <article className="paper-panel topic-wide">
             <div className="section-heading">
               <div><p className="eyebrow">Active recall</p><h2>Questions an interviewer may push on</h2></div>
             </div>
             <ol className="question-list">{activeTopic.interviewQuestions.map((item) => <li key={item}>{item}</li>)}</ol>
           </article>
+
+          <article className="paper-panel topic-wide decision-panel">
+            <div className="section-heading">
+              <div><p className="eyebrow">Decision discipline</p><h2>Before leaving this topic</h2></div>
+            </div>
+            <ul className="decision-checklist">
+              {activeTopic.decisionChecklist.map((item) => <li key={item}><span>✓</span>{item}</li>)}
+            </ul>
+          </article>
+
+          <article className="paper-panel topic-wide quiz-panel">
+            <div className="section-heading">
+              <div><p className="eyebrow">Knowledge check</p><h2>Commit before revealing the reasoning.</h2></div>
+            </div>
+            <div className="quiz-list">
+              {activeTopic.quiz.map((question, questionIndex) => {
+                const selected = quizAnswers[activeTopic.id]?.[questionIndex];
+                const answered = selected !== undefined;
+                return (
+                  <fieldset key={question.prompt}>
+                    <legend><span>Q{questionIndex + 1}</span>{question.prompt}</legend>
+                    <div className="quiz-options">
+                      {question.options.map((option, optionIndex) => {
+                        const isCorrect = answered && optionIndex === question.answerIndex;
+                        const isWrong = answered && optionIndex === selected && optionIndex !== question.answerIndex;
+                        return (
+                          <button
+                            type="button"
+                            key={option}
+                            className={isCorrect ? "correct" : isWrong ? "wrong" : ""}
+                            onClick={() => answerQuiz(activeTopic.id, questionIndex, optionIndex)}
+                            disabled={answered}
+                            aria-pressed={answered ? optionIndex === selected : undefined}
+                          >
+                            <span>{String.fromCharCode(65 + optionIndex)}</span>{option}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {answered && <p className="quiz-explanation" role="status" aria-live="polite">{selected === question.answerIndex ? "Correct. " : "Not quite. "}{question.explanation}</p>}
+                  </fieldset>
+                );
+              })}
+            </div>
+          </article>
+
           <article className="exercise-card topic-wide">
             <div><p className="eyebrow inverted">Component exercise</p><h2>{activeTopic.exercise}</h2></div>
-            <button className="button light" onClick={() => selectView(activeTopic.id === "estimation" ? "drills" : "practice")}>Open workspace</button>
+            <button className="button light" onClick={openTopicExercise}>Open workspace</button>
           </article>
+
+          {activeTopic.furtherReading?.length ? (
+            <article className="paper-panel topic-wide reading-panel">
+              <p className="eyebrow">Primary reading</p>
+              <div>{activeTopic.furtherReading.map((item) => <a key={item.url} href={item.url} target="_blank" rel="noreferrer">{item.label}<span>↗</span></a>)}</div>
+            </article>
+          ) : null}
+
           <article className="paper-panel topic-wide">
             <label className="field-label" htmlFor="topic-notes">Personal notes</label>
             <textarea
@@ -842,10 +1131,24 @@ export default function Home() {
           {estimationDrills.map((drill, index) => (
             <button
               key={drill.id}
+              id={`drill-tab-${drill.id}`}
               role="tab"
               aria-selected={index === activeDrillIndex}
+              aria-controls="drill-panel"
+              tabIndex={index === activeDrillIndex ? 0 : -1}
               className={index === activeDrillIndex ? "active" : ""}
               onClick={() => chooseDrill(index)}
+              onKeyDown={(event) => {
+                let nextIndex = activeDrillIndex;
+                if (event.key === "ArrowRight") nextIndex = (activeDrillIndex + 1) % estimationDrills.length;
+                else if (event.key === "ArrowLeft") nextIndex = (activeDrillIndex - 1 + estimationDrills.length) % estimationDrills.length;
+                else if (event.key === "Home") nextIndex = 0;
+                else if (event.key === "End") nextIndex = estimationDrills.length - 1;
+                else return;
+                event.preventDefault();
+                chooseDrill(nextIndex);
+                window.requestAnimationFrame(() => document.getElementById(`drill-tab-${estimationDrills[nextIndex].id}`)?.focus());
+              }}
             >
               <span>{String(index + 1).padStart(2, "0")}</span>
               {drill.title}
@@ -853,7 +1156,13 @@ export default function Home() {
           ))}
         </div>
 
-        <div className="drill-workspace">
+        <div
+          className="drill-workspace"
+          id="drill-panel"
+          role="tabpanel"
+          aria-labelledby={`drill-tab-${activeDrill.id}`}
+          tabIndex={0}
+        >
           <article className="drill-prompt">
             <p className="eyebrow inverted">{activeDrill.kind}</p>
             <h2>{activeDrill.prompt}</h2>
@@ -868,14 +1177,19 @@ export default function Home() {
               onChange={(event) => setDrillAnswer(event.target.value)}
               placeholder={'Assumptions:\n\nCalculation:\n\nApproximate answer:\n\nWhat this changes:'}
             />
-            <button className="button primary" onClick={() => setDrillRevealed((value) => !value)}>
+            <button
+              className="button primary"
+              onClick={() => setDrillRevealed((value) => !value)}
+              aria-expanded={drillRevealed}
+              aria-controls="drill-solution"
+            >
               {drillRevealed ? "Hide worked answer" : "Reveal worked answer"}
             </button>
           </div>
         </div>
 
         {drillRevealed && (
-          <article className="solution-sheet" aria-live="polite">
+          <article className="solution-sheet" id="drill-solution">
             <div>
               <p className="eyebrow">Assumptions</p>
               <ul>{activeDrill.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
@@ -910,8 +1224,26 @@ export default function Home() {
           </div>
         </div>
 
+        <div className="practice-category-tabs" aria-label="Design category">
+          {(["classic", "ml", "llm"] as DesignCategory[]).map((category) => (
+            <button
+              key={category}
+              className={category === practiceCategory ? "active" : ""}
+              onClick={() => {
+                setPracticeCategory(category);
+                const first = designPrompts.find((prompt) => prompt.category === category);
+                if (first && activePrompt.category !== category) choosePractice(first);
+              }}
+              aria-pressed={category === practiceCategory}
+            >
+              <strong>{category === "ml" ? "ML systems" : category === "llm" ? "LLM infrastructure" : "Classic systems"}</strong>
+              <span>{designPrompts.filter((prompt) => prompt.category === category).length} prompts</span>
+            </button>
+          ))}
+        </div>
+
         <div className="prompt-switcher" aria-label="Design prompt">
-          {designPrompts.map((prompt) => (
+          {visiblePrompts.map((prompt) => (
             <button
               key={prompt.id}
               className={prompt.id === activePrompt.id ? "active" : ""}
@@ -954,6 +1286,75 @@ export default function Home() {
             </label>
           ))}
         </div>
+
+        <section className="reference-gate" aria-labelledby="reference-heading">
+          <div>
+            <p className="eyebrow inverted">Calibration guide</p>
+            <h2 id="reference-heading">Compare against a senior-level reference.</h2>
+            <p>Attempt the design first. The guide is a decision map—not the only valid architecture.</p>
+          </div>
+          <button
+            className="button light"
+            onClick={() => setReferenceRevealed((value) => !value)}
+            aria-expanded={referenceRevealed}
+            aria-controls="reference-solution"
+          >
+            {referenceRevealed ? "Hide reference" : "Reveal reference"}
+          </button>
+          <span className="sr-only" role="status" aria-live="polite">
+            {referenceRevealed ? "Reference solution revealed." : ""}
+          </span>
+        </section>
+
+        {referenceRevealed && (
+          <section className="reference-solution" id="reference-solution" aria-labelledby="reference-heading">
+            <div className="reference-columns">
+              <article>
+                <p className="eyebrow">Scope choices</p>
+                <ul>{activePrompt.reference.scope.map((item) => <li key={item}>{item}</li>)}</ul>
+              </article>
+              <article>
+                <p className="eyebrow">Correctness invariants</p>
+                <ul>{activePrompt.reference.invariants.map((item) => <li key={item}>{item}</li>)}</ul>
+              </article>
+              <article>
+                <p className="eyebrow">API contracts</p>
+                <ul>{activePrompt.reference.apis.map((item) => <li key={item}><code>{item}</code></li>)}</ul>
+              </article>
+              <article>
+                <p className="eyebrow">Data model</p>
+                <ul>{activePrompt.reference.dataModel.map((item) => <li key={item}><code>{item}</code></li>)}</ul>
+              </article>
+            </div>
+
+            <article className="reference-flow">
+              <p className="eyebrow">End-to-end architecture</p>
+              <ol>{activePrompt.reference.architecture.map((item, index) => <li key={item}><span>{String(index + 1).padStart(2, "0")}</span>{item}</li>)}</ol>
+            </article>
+
+            <div className="reference-deep-dives">
+              {activePrompt.reference.deepDives.map((section) => (
+                <article key={section.title}>
+                  <p className="eyebrow">Deep dive</p>
+                  <h3>{section.title}</h3>
+                  <p>{section.summary}</p>
+                  <ul>{section.points.map((point) => <li key={point}>{point}</li>)}</ul>
+                </article>
+              ))}
+            </div>
+
+            <div className="reference-columns compact-reference">
+              <article>
+                <p className="eyebrow">10× evolution</p>
+                <ul>{activePrompt.reference.scaling.map((item) => <li key={item}>{item}</li>)}</ul>
+              </article>
+              <article>
+                <p className="eyebrow">SLIs & operational signals</p>
+                <ul>{activePrompt.reference.observability.map((item) => <li key={item}>{item}</li>)}</ul>
+              </article>
+            </div>
+          </section>
+        )}
 
         <section className="rubric-section" aria-labelledby="rubric-heading">
           <div className="section-heading">
@@ -1174,21 +1575,21 @@ export default function Home() {
         </nav>
 
         <div className="rail-progress">
-          <div><span>Week 1 progress</span><strong>{progressPercent}%</strong></div>
-          <div className="progress-track" aria-hidden="true"><i style={{ width: `${progressPercent}%` }} /></div>
-          <p>{completedTopics}/{weekOneTopics.length} sessions · {streak} day streak</p>
+          <div><span>Full syllabus</span><strong>{overallProgressPercent}%</strong></div>
+          <div className="progress-track" aria-hidden="true"><i style={{ width: `${overallProgressPercent}%` }} /></div>
+          <p>{totalCompletedTopics}/{allTopics.length} modules · {streak} day streak</p>
         </div>
       </aside>
 
       <div className="workspace">
         <header className="site-header">
-          <div className="mobile-brand"><strong>System Design Lab</strong><span>W01</span></div>
+          <div className="mobile-brand"><strong>System Design Lab</strong><span>W{String(currentWeek.week).padStart(2, "0")}</span></div>
           <nav className="mobile-nav" aria-label="Mobile navigation">
-            {navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => selectView(item.id)}>{item.label}</button>)}
+            {navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => selectView(item.id)} aria-current={view === item.id ? "page" : undefined}>{item.label}</button>)}
           </nav>
           <div className="header-context">
             <span className="live-dot" aria-hidden="true" />
-            <p><strong>Current focus</strong><span>Foundations & estimation</span></p>
+            <p><strong>Current focus</strong><span>Week {currentWeek.week} · {currentWeek.title}</span></p>
           </div>
           <div className="header-actions">
             <span className="local-badge">Saved locally</span>
@@ -1206,7 +1607,7 @@ export default function Home() {
           {!hydrated && <p className="sr-only" aria-live="polite">Loading saved study progress.</p>}
           {viewContent[view]()}
         </main>
-        <footer className="site-footer"><span>System Design Interview Lab</span><p>Estimate → design → stress → reflect.</p><span>Local-first · v1</span></footer>
+        <footer className="site-footer"><span>System Design Interview Lab</span><p>Estimate → design → stress → reflect.</p><span>{allTopics.length} modules · local-first</span></footer>
       </div>
     </div>
   );
