@@ -179,6 +179,39 @@ test("ships a reference architecture diagram for every design room", async () =>
   }
 });
 
+test("defines vocabulary in place, with the list kept for review", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  // The reader used to meet a 28-entry definition list wedged between the
+  // primer and the actual content. Definitions now arrive inline at the term,
+  // so the list moves below the mechanics and starts closed — but it stays,
+  // because it is the only surface you can scan and self-test against.
+  const sectionOrder = [...page.matchAll(/^\s{2}(\w+): \{ eyebrow:/gm)].map((match) => match[1]);
+  assert.ok(
+    sectionOrder.indexOf("glossary") > sectionOrder.indexOf("mechanics"),
+    "the glossary belongs after the mechanics, not between the primer and them",
+  );
+  assert.match(page, /glossary: \{ eyebrow: "Vocabulary"[^}]*defaultOpen: false/, "the glossary list must start collapsed");
+
+  // Marking is scoped per section on purpose; a single module-wide scope would
+  // spend a term's only mark inside a panel that defaults to collapsed.
+  const markers = [...page.matchAll(/const mark\w+ = createSectionMarker\(activeTopic\.glossary\)/g)];
+  assert.ok(markers.length >= 5, `expected a marking scope per section, found ${markers.length}`);
+  assert.match(page, /import \{ createSectionMarker \} from "\.\/content\/glossaryMatch"/);
+  assert.match(page, /<Prose nodes=\{markPrimer\(paragraph\)\} \/>/, "primer prose must be marked");
+  assert.match(page, /<Prose nodes=\{markMechanics\(point\)\} \/>/, "deep-dive points must be marked");
+
+  // A hover-only affordance would be unusable on touch and unreachable by
+  // keyboard, so the trigger has to be a real button with focus and click.
+  const term = await readFile(new URL("../app/GlossaryTerm.tsx", import.meta.url), "utf8");
+  assert.match(term, /<button/, "the term trigger must be a button, not a styled span");
+  assert.match(term, /onFocus=\{show\}/, "definitions must open on keyboard focus");
+  assert.match(term, /onClick=\{\(\) => \(open \? hide\(\) : show\(\)\)\}/, "definitions must toggle on tap");
+  assert.match(term, /event\.key === "Escape"/, "definitions must be dismissible without moving the pointer");
+  assert.match(term, /role="tooltip"/);
+  assert.match(term, /aria-describedby=\{open \? panelId : undefined\}/);
+});
+
 test("derives diagram geometry from one shared module", async () => {
   // The diagrams only exist after a client render, so scraping the export
   // cannot see them. `npm run validate:content` checks the actual pixel
@@ -360,7 +393,17 @@ test("explains every module from zero and defines its vocabulary", async () => {
 
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /primer: \{ eyebrow: "Start here"[^}]*defaultOpen: true/, "the primer must open first on the page");
-  assert.match(page, /glossary: \{ eyebrow: "Vocabulary"[^}]*defaultOpen: true/, "the glossary must be open, not hidden behind a click");
+  // The glossary itself is now collapsed by default. That is not the layer
+  // getting weaker: definitions reach the reader inline at each term's first
+  // use, which is checked in "defines vocabulary in place". What must not
+  // regress is that the vocabulary is reachable without a click *somewhere* —
+  // so if the list is closed, the inline marking has to be wired up.
+  assert.match(page, /glossary: \{ eyebrow: "Vocabulary"[^}]*defaultOpen: (true|false)/, "the glossary section must exist");
+  assert.ok(
+    /defaultOpen: true/.test(page.match(/glossary: \{ eyebrow: "Vocabulary"[^}]*\}/)?.[0] ?? "")
+      || /createSectionMarker\(activeTopic\.glossary\)/.test(page),
+    "a collapsed glossary is only acceptable when terms are defined inline",
+  );
   assert.match(page, /activeTopic\.primer\.workedExample\.steps\.map/, "the worked example must render its steps");
   assert.match(page, /entry\.expansion \? <span className="glossary-expansion">/, "expansions must be shown, not just stored");
 

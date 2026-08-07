@@ -78,6 +78,12 @@ export type GlossaryEntry = {
   /** What the letters stand for, when the term is an acronym. */
   expansion?: string;
   definition: string;
+  /**
+   * Extra spellings this term should be recognised as when it appears in module
+   * prose. The matcher already handles regular plurals, so this is only for
+   * irregular forms or a second name the module genuinely uses.
+   */
+  aliases?: string[];
 };
 
 export type StudyTopic = {

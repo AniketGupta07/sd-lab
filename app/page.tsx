@@ -17,6 +17,8 @@ import {
   type MistakeCategory,
 } from "./studyData";
 import { computeDiagramLayout, NODE_H, NODE_W, nodeX, nodeY } from "./content/diagramLayout";
+import { createSectionMarker } from "./content/glossaryMatch";
+import { Prose } from "./GlossaryTerm";
 
 type View =
   | "dashboard"
@@ -306,8 +308,12 @@ type StudyState = {
  */
 const topicSections = {
   primer: { eyebrow: "Start here", title: "Explained from zero", defaultOpen: true },
-  glossary: { eyebrow: "Vocabulary", title: "Every term this module uses", defaultOpen: true },
   mechanics: { eyebrow: "Mechanics", title: "What happens under the hood", defaultOpen: true },
+  // Closed, and below the mechanics rather than above them. Definitions now
+  // reach the reader inline at the point of confusion, so the list no longer
+  // has to be a wall of 28 entries between the primer and the actual content.
+  // It stays because it is the one surface you can scan and self-test against.
+  glossary: { eyebrow: "Vocabulary", title: "Review every term in one place", defaultOpen: false },
   // Closed by default now that the primer sits above it: the top of the page
   // should be the explanation, not four open panels of compressed prose.
   tradeoffs: { eyebrow: "Trade-offs", title: "Say these aloud", defaultOpen: false },
@@ -1429,6 +1435,17 @@ export default function Home() {
 
   function renderTopic() {
     const topicProgress = study.topics[activeTopic.id];
+    // One marking scope per section, created fresh on every render so the
+    // output stays a pure function of the topic. Scoping per section rather
+    // than per module is deliberate: most sections are collapsed, and a
+    // once-per-module rule would spend a term's only mark inside a panel the
+    // reader never opened. See app/content/glossaryMatch.ts.
+    const markPrimer = createSectionMarker(activeTopic.glossary);
+    const markMechanics = createSectionMarker(activeTopic.glossary);
+    const markTradeoffs = createSectionMarker(activeTopic.glossary);
+    const markFailures = createSectionMarker(activeTopic.glossary);
+    const markQuestions = createSectionMarker(activeTopic.glossary);
+    const markChecklist = createSectionMarker(activeTopic.glossary);
     return (
       <section aria-labelledby="topic-title">
         <div className="topic-week-tabs" aria-label="Curriculum week">
@@ -1506,17 +1523,17 @@ export default function Home() {
 
           <Section id="primer" note="No background assumed" className="primer-panel">
             <div className="primer-lede">
-              <p className="primer-plain">{activeTopic.primer.plainSummary}</p>
+              <p className="primer-plain"><Prose nodes={markPrimer(activeTopic.primer.plainSummary)} /></p>
               <aside className="primer-analogy">
                 <p className="eyebrow">Think of it like</p>
-                <p>{activeTopic.primer.analogy}</p>
+                <p><Prose nodes={markPrimer(activeTopic.primer.analogy)} /></p>
               </aside>
             </div>
             <div className="primer-sections">
               {activeTopic.primer.sections.map((section, index) => (
                 <section key={section.heading}>
                   <h3><span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>{section.heading}</h3>
-                  {section.body.map((paragraph) => <p key={paragraph.slice(0, 48)}>{paragraph}</p>)}
+                  {section.body.map((paragraph) => <p key={paragraph.slice(0, 48)}><Prose nodes={markPrimer(paragraph)} /></p>)}
                 </section>
               ))}
             </div>
@@ -1525,17 +1542,34 @@ export default function Home() {
                 <p className="eyebrow">Worked example</p>
                 <strong>{activeTopic.primer.workedExample.title}</strong>
               </figcaption>
-              <p className="primer-example-setup">{activeTopic.primer.workedExample.setup}</p>
+              <p className="primer-example-setup"><Prose nodes={markPrimer(activeTopic.primer.workedExample.setup)} /></p>
               <ol>
                 {activeTopic.primer.workedExample.steps.map((step, index) => (
-                  <li key={step.slice(0, 48)}><span aria-hidden="true">{index + 1}</span><p>{step}</p></li>
+                  <li key={step.slice(0, 48)}><span aria-hidden="true">{index + 1}</span><p><Prose nodes={markPrimer(step)} /></p></li>
                 ))}
               </ol>
-              <p className="primer-example-takeaway"><strong>Takeaway.</strong> {activeTopic.primer.workedExample.takeaway}</p>
+              <p className="primer-example-takeaway"><strong>Takeaway.</strong> <Prose nodes={markPrimer(activeTopic.primer.workedExample.takeaway)} /></p>
             </figure>
           </Section>
 
-          <Section id="glossary" count={activeTopic.glossary.length} note="Defined before it is used" className="glossary-panel">
+          <Section id="mechanics" count={activeTopic.deepDive.length} note="Explain, don't name-drop" className="deep-dive-panel">
+            <div className="deep-dive-list">
+              {activeTopic.deepDive.map((section, index) => (
+                <details key={section.title} open={index === 0}>
+                  <summary><span>{String(index + 1).padStart(2, "0")}</span><strong>{section.title}</strong></summary>
+                  <p><Prose nodes={markMechanics(section.summary)} /></p>
+                  <ul>{section.points.map((point) => <li key={point}><Prose nodes={markMechanics(point)} /></li>)}</ul>
+                </details>
+              ))}
+            </div>
+          </Section>
+
+          <Section id="glossary" count={activeTopic.glossary.length} note="Also on hover, in place" className="glossary-panel">
+            <p className="section-lede">
+              Every term is marked at its first use in each section above — hover, tap, or tab to it for the
+              definition. This is the same list, for scanning before an interview: cover the definitions and
+              see how many you can say.
+            </p>
             <dl className="glossary-list">
               {activeTopic.glossary.map((entry) => (
                 <div key={entry.term}>
@@ -1549,26 +1583,14 @@ export default function Home() {
             </dl>
           </Section>
 
-          <Section id="mechanics" count={activeTopic.deepDive.length} note="Explain, don't name-drop" className="deep-dive-panel">
-            <div className="deep-dive-list">
-              {activeTopic.deepDive.map((section, index) => (
-                <details key={section.title} open={index === 0}>
-                  <summary><span>{String(index + 1).padStart(2, "0")}</span><strong>{section.title}</strong></summary>
-                  <p>{section.summary}</p>
-                  <ul>{section.points.map((point) => <li key={point}>{point}</li>)}</ul>
-                </details>
-              ))}
-            </div>
-          </Section>
-
           <Section id="tradeoffs" count={activeTopic.tradeoffs.length}>
             <div className="tradeoff-table">
               {activeTopic.tradeoffs.map((item) => (
                 <div key={item.decision}>
                   <strong>{item.decision}</strong>
-                  <p><span>A</span>{item.preferA}</p>
-                  <p><span>B</span>{item.preferB}</p>
-                  <small>Watch: {item.watch}</small>
+                  <p><span>A</span><Prose nodes={markTradeoffs(item.preferA)} /></p>
+                  <p><span>B</span><Prose nodes={markTradeoffs(item.preferB)} /></p>
+                  <small>Watch: <Prose nodes={markTradeoffs(item.watch)} /></small>
                 </div>
               ))}
             </div>
@@ -1579,20 +1601,20 @@ export default function Home() {
               {activeTopic.failureModes.map((item) => (
                 <div key={item.mode}>
                   <strong>{item.mode}</strong>
-                  <p><span>Signal</span>{item.symptom}</p>
-                  <p><span>Mitigation</span>{item.mitigation}</p>
+                  <p><span>Signal</span><Prose nodes={markFailures(item.symptom)} /></p>
+                  <p><span>Mitigation</span><Prose nodes={markFailures(item.mitigation)} /></p>
                 </div>
               ))}
             </div>
           </Section>
 
           <Section id="questions" count={activeTopic.interviewQuestions.length}>
-            <ol className="question-list">{activeTopic.interviewQuestions.map((item) => <li key={item}>{item}</li>)}</ol>
+            <ol className="question-list">{activeTopic.interviewQuestions.map((item) => <li key={item}><Prose nodes={markQuestions(item)} /></li>)}</ol>
           </Section>
 
           <Section id="checklist" count={activeTopic.decisionChecklist.length} className="decision-panel">
             <ul className="decision-checklist">
-              {activeTopic.decisionChecklist.map((item) => <li key={item}><span>✓</span>{item}</li>)}
+              {activeTopic.decisionChecklist.map((item) => <li key={item}><span>✓</span><Prose nodes={markChecklist(item)} /></li>)}
             </ul>
           </Section>
 

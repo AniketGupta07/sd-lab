@@ -2267,6 +2267,61 @@ h2 {
 
 .primer-example-takeaway strong { color: var(--indigo); }
 
+/* ── Inline glossary terms ──────────────────────────────────────────── */
+
+.glossary-mark-wrap { display: inline; }
+
+/* Underlined rather than colored: at two or three marks a paragraph, colored
+   runs would read as links and pull the eye off the sentence. */
+.glossary-mark {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: help;
+  text-decoration: underline dotted var(--ink-faint);
+  text-underline-offset: 3px;
+}
+
+.glossary-mark:hover,
+.glossary-mark:focus-visible {
+  color: var(--indigo);
+  text-decoration-color: var(--indigo);
+}
+
+.glossary-mark:focus-visible { border-radius: 2px; outline: 2px solid var(--indigo); outline-offset: 2px; }
+
+/* The transparent top padding is a bridge: without it the gap between term and
+   card counts as leaving the wrapper, and the panel closes as the pointer
+   travels toward it. */
+.glossary-pop { position: fixed; z-index: 60; padding-top: 8px; }
+
+.glossary-pop-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: 0 12px 28px rgb(15 23 42 / 18%);
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.glossary-pop-card strong { font-size: 0.9rem; font-weight: 700; }
+.glossary-pop-card em { color: var(--indigo); font-size: 0.8rem; font-style: normal; font-weight: 600; }
+.glossary-pop-card > span { color: var(--ink-soft); }
+
+.section-lede { margin-bottom: 16px; color: var(--ink-faint); font-size: 0.9rem; line-height: 1.6; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .glossary-pop-card { animation: glossary-pop-in 110ms ease-out; }
+  @keyframes glossary-pop-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+}
+
 /* ── Glossary ───────────────────────────────────────────────────────── */
 
 .glossary-list {
