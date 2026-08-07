@@ -28,6 +28,13 @@ const VIEWPORT_MARGIN = 12;
 export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; children: string }) {
   const [anchor, setAnchor] = useState<{ top: number; left: number; width: number } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  /**
+   * When the last pointer press happened, so focus can tell a Tab from a tap.
+   * `:focus-visible` looks like the right tool and is not: at the moment the
+   * focus handler runs it does not yet reliably report true for keyboard focus,
+   * which left the definition unopenable by keyboard.
+   */
+  const pointerDownAt = useRef(0);
   const panelId = `glossary-${useId().replace(/:/g, "")}`;
   const open = anchor !== null;
 
@@ -49,27 +56,62 @@ export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; ch
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") hide();
     }
-    // Fixed coordinates are captured once, so a scroll would leave the panel
-    // stranded. Closing is the honest response, and matches what a reader
-    // scrolling away expects anyway.
+    // Fixed coordinates are measured once, so the panel has to follow its term
+    // on scroll. Closing instead looks simpler and is wrong: tabbing to a term
+    // that is off-screen makes the browser scroll it into view, which fired the
+    // close handler the instant focus opened the panel and made the whole
+    // feature unreachable by keyboard.
+    let frame = 0;
+    const reposition = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const rect = trigger.current?.getBoundingClientRect();
+        if (!rect) return;
+        // Deliberately no "close when off-screen" branch. Tabbing to a term
+        // below the fold fires focus *before* the browser scrolls it into view,
+        // so an off-screen test here sees stale coordinates and closes the
+        // panel it was meant to be following. The panel is anchored to the
+        // term; if the term is out of view the panel is too, which is correct.
+        const width = Math.min(PANEL_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
+        setAnchor({
+          top: rect.bottom,
+          left: Math.max(VIEWPORT_MARGIN, Math.min(rect.left, window.innerWidth - width - VIEWPORT_MARGIN)),
+          width,
+        });
+      });
+    };
     document.addEventListener("keydown", onKeyDown);
-    window.addEventListener("scroll", hide, true);
-    window.addEventListener("resize", hide);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
     return () => {
+      cancelAnimationFrame(frame);
       document.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("scroll", hide, true);
-      window.removeEventListener("resize", hide);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
     };
   }, [open, hide]);
 
   return (
-    <span className="glossary-mark-wrap" onMouseEnter={show} onMouseLeave={hide}>
+    // Hover opens only for an actual mouse. A tap synthesises
+    // pointerenter -> focus -> click, so reacting to the first two would open
+    // the panel and then let the click toggle it straight back shut — which is
+    // exactly what happened before this guard, leaving the feature dead on
+    // touch. Ignoring non-mouse pointers hands touch entirely to onClick.
+    <span
+      className="glossary-mark-wrap"
+      onPointerEnter={(event) => { if (event.pointerType === "mouse") show(); }}
+      onPointerLeave={(event) => { if (event.pointerType === "mouse") hide(); }}
+    >
       <button
         ref={trigger}
         type="button"
         className="glossary-mark"
         aria-describedby={open ? panelId : undefined}
-        onFocus={show}
+        onPointerDown={() => { pointerDownAt.current = Date.now(); }}
+        // Same reasoning as the hover guard: a tap focuses the button, and only
+        // keyboard focus should reveal the definition by itself. A focus that
+        // did not follow a pointer press is a Tab.
+        onFocus={() => { if (Date.now() - pointerDownAt.current > 300) show(); }}
         onBlur={hide}
         onClick={() => (open ? hide() : show())}
       >

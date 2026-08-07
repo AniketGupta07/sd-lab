@@ -205,11 +205,26 @@ test("defines vocabulary in place, with the list kept for review", async () => {
   // keyboard, so the trigger has to be a real button with focus and click.
   const term = await readFile(new URL("../app/GlossaryTerm.tsx", import.meta.url), "utf8");
   assert.match(term, /<button/, "the term trigger must be a button, not a styled span");
-  assert.match(term, /onFocus=\{show\}/, "definitions must open on keyboard focus");
   assert.match(term, /onClick=\{\(\) => \(open \? hide\(\) : show\(\)\)\}/, "definitions must toggle on tap");
   assert.match(term, /event\.key === "Escape"/, "definitions must be dismissible without moving the pointer");
   assert.match(term, /role="tooltip"/);
   assert.match(term, /aria-describedby=\{open \? panelId : undefined\}/);
+
+  // Three guards, each pinning a bug that browser testing caught and unit
+  // tests could not. Removing any of them breaks one whole input method.
+  //
+  // 1. A tap synthesises pointerenter -> focus -> click. Opening on a non-mouse
+  //    pointer let the click toggle straight back shut: dead on touch.
+  assert.match(term, /event\.pointerType === "mouse"/, "hover must open only for a real mouse, or tap toggles itself shut");
+  // 2. Same collision via focus. `:focus-visible` is the obvious guard and does
+  //    not work — it is not yet true when the focus handler runs, which made
+  //    the definition unreachable by keyboard.
+  assert.match(term, /Date\.now\(\) - pointerDownAt\.current > 300/, "focus must distinguish a Tab from a tap without :focus-visible");
+  assert.doesNotMatch(term, /matches\(":focus-visible"\)/, ":focus-visible is unreliable at focus time; use the pointer-press guard");
+  // 3. Tabbing to a term below the fold fires focus before the browser scrolls
+  //    it into view, so closing on off-screen coordinates killed the panel the
+  //    instant it opened. The listener must reposition, never close.
+  assert.match(term, /window\.addEventListener\("scroll", reposition, true\)/, "scroll must reposition the panel, not close it");
 });
 
 test("derives diagram geometry from one shared module", async () => {
