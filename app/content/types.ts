@@ -122,7 +122,7 @@ export type TopicPrimerEntry = Pick<StudyTopic, "primer" | "glossary">;
 export type DesignCategory = "classic" | "ml" | "llm";
 
 /**
- * Node roles. These drive colour and shape so a diagram can be read at a
+ * Node roles. These drive color and shape so a diagram can be read at a
  * glance: what stores state, what is merely compute, what crosses a trust
  * boundary.
  */

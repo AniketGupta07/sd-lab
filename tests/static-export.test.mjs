@@ -179,6 +179,22 @@ test("ships a reference architecture diagram for every design room", async () =>
   }
 });
 
+test("derives diagram geometry from one shared module", async () => {
+  // The diagrams only exist after a client render, so scraping the export
+  // cannot see them. `npm run validate:content` checks the actual pixel
+  // geometry instead; this pins the renderer to the same module, so the two
+  // cannot drift back apart into a renderer that clips labels and a guard that
+  // counts strings and never notices.
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const validator = await readFile(new URL("../app/content/validate.ts", import.meta.url), "utf8");
+
+  assert.match(page, /import \{ computeDiagramLayout[^}]*\} from "\.\/content\/diagramLayout"/, "the renderer must use the shared layout");
+  assert.match(page, /const \{ width, height, paths \} = computeDiagramLayout\(diagram\)/, "the renderer must not recompute geometry inline");
+  assert.doesNotMatch(page, /const height = DIAGRAM_PAD \* 2 \+ rows \* NODE_H/, "viewBox height must come from drawn geometry, not the node grid");
+  assert.match(validator, /computeDiagramLayout\(diagram\)/, "the validator must check the geometry the renderer draws");
+  assert.match(validator, /falls outside the \$\{layout\.height\}px canvas/, "the validator must assert labels stay on the canvas");
+});
+
 test("schedules free-recall cards for every module", async () => {
   const files = await Promise.all(contentPaths.map((name) => readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8")));
   const content = files.join("\n");
@@ -201,10 +217,13 @@ test("schedules free-recall cards for every module", async () => {
 test("renders selectors for every week and every prompt category", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const studyData = await readFile(new URL("../app/studyData.ts", import.meta.url), "utf8");
-  const weekPlanBlock = studyData.match(/export const curriculumWeeks:[\s\S]*?= \[([\s\S]*?)\n\];/)?.[1] ?? "";
+  // The literal is the seed list; `curriculumWeeks` is derived from it so the
+  // stated weekly hours cannot drift from the module times rendered beneath.
+  const weekPlanBlock = studyData.match(/const weekPlanSeeds: WeekPlanSeed\[\] = \[([\s\S]*?)\n\];/)?.[1] ?? "";
   const weekSelectors = Array.from(weekPlanBlock.matchAll(/^\s+week:\s*(\d{1,2}),\s*$/gm), (match) => Number(match[1]));
 
   assert.deepEqual(weekSelectors, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.match(studyData, /export const curriculumWeeks: WeekPlan\[\] = weekPlanSeeds\.map/, "weekly hours must be derived, not hand-written");
   assert.match(page, /className="topic-week-tabs"[\s\S]*?curriculumWeeks\.map\(\(week\)/);
   assert.match(page, /const visiblePrompts = designPrompts\.filter\(\(prompt\) => prompt\.category === practiceCategory\)/);
   assert.match(page, /\(\["classic",\s*"ml",\s*"llm"\] as DesignCategory\[\]\)\.map/);
@@ -326,15 +345,18 @@ test("explains every module from zero and defines its vocabulary", async () => {
   }
 
   // The rule this whole layer exists to enforce: an acronym is never used
-  // without being expanded. The build asserts it; this pins the assertion.
-  assert.match(studyData, /glossary acronym .+ must be expanded/, "acronyms must be expanded, not merely listed");
+  // without being expanded. `validate:content` asserts it; this pins the
+  // assertion. The harness lives in its own module rather than at studyData
+  // scope so it does not ship to the browser.
+  const validator = await readFile(new URL("../app/content/validate.ts", import.meta.url), "utf8");
+  assert.match(validator, /glossary acronym .+ must be expanded/, "acronyms must be expanded, not merely listed");
   const bareAcronyms = [...primers.matchAll(/\{ term: "([A-Z0-9]{2,6}(?:\/[A-Z0-9]{2,6})*)"(?!, expansion)/g)]
     .map((match) => match[1]);
   assert.deepEqual(bareAcronyms, [], "these acronym-shaped terms carry no expansion");
 
   // Substance is checked over a whole section, so a one-line lede stays legal
   // while an empty section does not.
-  assert.match(studyData, /primer section "\$\{section\.heading\}" is too thin/, "section substance must be enforced");
+  assert.match(validator, /primer section "\$\{section\.heading\}" is too thin/, "section substance must be enforced");
 
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /primer: \{ eyebrow: "Start here"[^}]*defaultOpen: true/, "the primer must open first on the page");

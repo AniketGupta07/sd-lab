@@ -3,17 +3,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   allTopics,
+  BASELINE_INTERVIEW_MINUTES,
   curriculumWeeks,
   designPrompts,
   estimationDrills,
   interviewPhases,
   mistakeCategories,
+  phaseMinutes,
   standardQuestions,
   type ArchitectureDiagram,
   type DesignCategory,
   type DesignPrompt,
   type MistakeCategory,
 } from "./studyData";
+import { computeDiagramLayout, NODE_H, NODE_W, nodeX, nodeY } from "./content/diagramLayout";
 
 type View =
   | "dashboard"
@@ -76,15 +79,6 @@ type PracticeDraft = {
 const SKETCH_WIDTH = 1600;
 const SKETCH_HEIGHT = 900;
 
-const NODE_W = 158;
-const NODE_H = 58;
-const COL_GAP = 92;
-const ROW_GAP = 28;
-const DIAGRAM_PAD = 10;
-
-const nodeX = (col: number) => DIAGRAM_PAD + col * (NODE_W + COL_GAP);
-const nodeY = (row: number) => DIAGRAM_PAD + row * (NODE_H + ROW_GAP);
-
 /** Greedy wrap so labels stay inside the box without measuring text. */
 function wrapLabel(label: string, max = 20): string[] {
   const lines: string[] = [];
@@ -104,52 +98,9 @@ function wrapLabel(label: string, max = 20): string[] {
  * vertically; backward edges bow underneath so they never trace over a box.
  */
 function ArchitectureFigure({ diagram, id }: { diagram: ArchitectureDiagram; id: string }) {
-  const byId = new Map(diagram.nodes.map((node) => [node.id, node]));
-  const cols = Math.max(...diagram.nodes.map((node) => node.col)) + 1;
-  const rows = Math.max(...diagram.nodes.map((node) => node.row)) + 1;
-  const width = DIAGRAM_PAD * 2 + cols * NODE_W + (cols - 1) * COL_GAP;
-  const height = DIAGRAM_PAD * 2 + rows * NODE_H + (rows - 1) * ROW_GAP;
+  const { width, height, paths } = computeDiagramLayout(diagram);
   const marker = `arrow-${id}`;
   const markerAsync = `arrow-async-${id}`;
-
-  const paths = diagram.edges.flatMap((edge) => {
-    const from = byId.get(edge.from);
-    const to = byId.get(edge.to);
-    if (!from || !to) return [];
-    const fx = nodeX(from.col);
-    const fy = nodeY(from.row);
-    const tx = nodeX(to.col);
-    const ty = nodeY(to.row);
-    let d: string;
-    let mid: { x: number; y: number };
-
-    if (from.col === to.col) {
-      const down = to.row > from.row;
-      const x = fx + NODE_W / 2;
-      const y1 = down ? fy + NODE_H : fy;
-      const y2 = down ? ty : ty + NODE_H;
-      d = `M ${x} ${y1} L ${x} ${y2}`;
-      mid = { x, y: (y1 + y2) / 2 };
-    } else if (to.col > from.col) {
-      const x1 = fx + NODE_W;
-      const y1 = fy + NODE_H / 2;
-      const x2 = tx;
-      const y2 = ty + NODE_H / 2;
-      const dx = Math.max(24, (x2 - x1) / 2);
-      d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-      mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 7 };
-    } else {
-      // Backward edge: drop below both boxes and return.
-      const x1 = fx + NODE_W / 2;
-      const y1 = fy + NODE_H;
-      const x2 = tx + NODE_W / 2;
-      const y2 = ty + NODE_H;
-      const dip = Math.max(y1, y2) + ROW_GAP * 0.8;
-      d = `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2}`;
-      mid = { x: (x1 + x2) / 2, y: dip + 4 };
-    }
-    return [{ edge, d, mid }];
-  });
 
   return (
     <figure className="arch-figure">
@@ -782,6 +733,7 @@ export default function Home() {
   const [saveNotice, setSaveNotice] = useState("");
   const [mockPrompt, setMockPrompt] = useState<DesignPrompt>(designPrompts[0]);
   const [mockChecks, setMockChecks] = useState<Record<string, boolean>>({});
+  const [followUpsShown, setFollowUpsShown] = useState(false);
   const [practiceCategory, setPracticeCategory] = useState<DesignCategory>("classic");
   const [referenceRevealed, setReferenceRevealed] = useState(false);
   const [practiceStep, setPracticeStep] = useState(practiceSteps[0].id);
@@ -1242,16 +1194,16 @@ export default function Home() {
 
   function renderDashboard() {
     const dueTopics = currentWeekTopics.filter((topic) => study.topics[topic.id]?.status !== "completed").slice(0, 3);
-    const targetCategory: DesignCategory | null = currentWeek.week <= 4
-      ? "classic"
-      : currentWeek.week <= 6
-        ? "ml"
-        : currentWeek.week === 7
-          ? "llm"
-          : null;
-    const nextPromptPool = targetCategory
-      ? designPrompts.filter((prompt) => prompt.category === targetCategory)
-      : designPrompts;
+    // Key off the week's tier, not its number: the syllabus was re-paced to
+    // twelve weeks and a hardcoded week ladder silently recommends the wrong
+    // discipline the moment those boundaries move.
+    const targetCategory: DesignCategory = currentWeek.tier >= 3 ? "llm" : currentWeek.tier === 2 ? "ml" : "classic";
+    // Prefer the designs this week actually schedules; fall back to the tier's
+    // whole library when the week names none.
+    const scheduled = designPrompts.filter((prompt) => currentWeek.designs.includes(prompt.title));
+    const nextPromptPool = scheduled.length > 0
+      ? scheduled
+      : designPrompts.filter((prompt) => prompt.category === targetCategory);
     const nextPrompt = nextPromptPool[study.attempts.length % nextPromptPool.length] ?? designPrompts[0];
     const dueMinutes = dueTopics.reduce((sum, topic) => sum + topic.estimatedMinutes, 0);
     const latestAttempt = study.attempts[0];
@@ -1328,7 +1280,7 @@ export default function Home() {
                   </button>
                   <button className="task-copy" onClick={() => openTopic(topic.id)}>
                     <strong>{topic.title}</strong>
-                    <span>{topic.eyebrow} · {topic.estimatedMinutes} min</span>
+                    <span>Week {topic.week} · Module {topic.day} · {topic.estimatedMinutes} min</span>
                   </button>
                   <span className={`status-mark ${study.topics[topic.id]?.status}`}>
                     {study.topics[topic.id]?.status === "in-progress" ? "In progress" : "Not started"}
@@ -1357,7 +1309,7 @@ export default function Home() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Reusable structure</p>
-                <h2 id="framework-heading">The 45-minute loop</h2>
+                <h2 id="framework-heading">The {BASELINE_INTERVIEW_MINUTES}-minute loop</h2>
               </div>
               <button className="text-button" onClick={() => selectView("practice")}>Use in practice →</button>
             </div>
@@ -1366,7 +1318,7 @@ export default function Home() {
                 <li key={phase.id}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <strong>{phase.label}</strong>
-                  <small>{phase.minutes} min</small>
+                  <small>{phaseMinutes(phase.share, BASELINE_INTERVIEW_MINUTES)} min</small>
                 </li>
               ))}
             </ol>
@@ -1421,7 +1373,7 @@ export default function Home() {
       <section aria-labelledby="curriculum-title">
         <div className="page-intro">
           <div>
-            <p className="eyebrow">Eight-week program</p>
+            <p className="eyebrow">{curriculumWeeks.length}-week program</p>
             <h1 id="curriculum-title">A deliberate path from fundamentals to mocks.</h1>
           </div>
           <p>{allTopics.length} senior-level modules with mechanisms, failure diagnosis, decision rules, quizzes, and {designPrompts.length} full design rooms.</p>
@@ -1451,6 +1403,12 @@ export default function Home() {
                     <span className="mini-label">Full designs</span>
                     <ul className="plain-list">{week.designs.map((design) => <li key={design}>{design}</li>)}</ul>
                   </div>
+                  {week.extraDesigns.length > 0 && (
+                    <div>
+                      <span className="mini-label">Extra practice</span>
+                      <ul className="plain-list">{week.extraDesigns.map((design) => <li key={design}>{design}</li>)}</ul>
+                    </div>
+                  )}
                   <div className="week-one-grid">
                     {weekTopics.map((topic) => (
                       <button key={topic.id} onClick={() => openTopic(topic.id)}>
@@ -2193,12 +2151,12 @@ export default function Home() {
                   onChange={(event) => setMockChecks((current) => ({ ...current, [phase.id]: event.target.checked }))}
                 />
                 <span><strong>{phase.label}</strong><small>{phase.description}</small></span>
-                <em>{phase.minutes}m</em>
+                <em>{phaseMinutes(phase.share, mockPrompt.durationMinutes)}m</em>
               </label>
             ))}
           </div>
         </article>
-        <div className="topic-grid mock-followups">
+        <div className="topic-grid">
           <article className="paper-panel">
             <p className="eyebrow">Expected deep dives</p>
             <ul className="arrow-list">{mockPrompt.expectedTopics.map((item) => <li key={item}>{item}</li>)}</ul>
@@ -2208,6 +2166,33 @@ export default function Home() {
             <ul className="arrow-list">{mockPrompt.commonFailureModes.map((item) => <li key={item}>{item}</li>)}</ul>
           </article>
         </div>
+        {/* The interviewer's probe list. Kept behind a reveal so it can be used
+            as a self-check after the attempt rather than read as a crib first. */}
+        <article className="paper-panel mock-followups">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Interviewer follow-ups</p>
+              <h2>{mockPrompt.followUpQuestions.length} questions they will push on</h2>
+            </div>
+            <button
+              className="button light"
+              onClick={() => setFollowUpsShown((shown) => !shown)}
+              aria-expanded={followUpsShown}
+              aria-controls="mock-followup-list"
+            >
+              {followUpsShown ? "Hide follow-ups" : "Reveal follow-ups"}
+            </button>
+          </div>
+          {followUpsShown ? (
+            <ol className="question-list" id="mock-followup-list">
+              {mockPrompt.followUpQuestions.map((question) => <li key={question}>{question}</li>)}
+            </ol>
+          ) : (
+            <p className="section-note" id="mock-followup-list">
+              Answer the prompt first, then reveal these and count how many you covered unprompted.
+            </p>
+          )}
+        </article>
       </section>
     );
   }

@@ -7,12 +7,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 1,
     tier: 1,
     title: "Feed Fan-out Strategies",
-    eyebrow: "Week 2 · Read-heavy systems",
+    eyebrow: "Pay at write or at read",
     estimatedMinutes: 75,
     summary:
       "Choose where a feed pays its join cost: when an author publishes, when a reader opens the feed, or through a hybrid that treats high-fan-out authors differently.",
     whyItMatters:
-      "Newsfeeds expose the central read-heavy trade-off between write amplification, read latency, freshness, and hotspot isolation. Interviewers expect the fan-out policy to follow measured graph shape and product latency goals.",
+      "One post from an account with 20 million followers is either 20 million inbox writes now or a 20-way merge on every read later. That placement decision, and nothing else in the design, sets write amplification, feed-open latency, freshness, and which accounts turn into hotspots. Follower counts are heavy-tailed enough that no single policy survives the whole graph, which is why real feeds run both and route authors between them by measured cost.",
     objectives: [
       "Derive fan-out-on-write, fan-out-on-read, and hybrid designs from follower-count and freshness requirements.",
       "Define an idempotent materialization pipeline with an explicit source of truth.",
@@ -33,9 +33,10 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Write-time materialization",
         summary: "A post commit emits one durable event; workers expand it into follower inbox entries outside the author transaction.",
         points: [
-          "Partition the event log by author so posts from one author remain ordered, then shard follower expansion into bounded batches.",
-          "Store compact `(recipientId, postId, authorId, createdAt)` entries and enforce uniqueness on `(recipientId, postId)` so replay is harmless.",
+          "Partition the event log by author so posts from one author stay ordered, then hand follower expansion to workers in bounded batches of a few thousand recipients each.",
+          "Store compact `(recipientId, postId, authorId, createdAt)` entries — roughly 32 bytes apiece, so a 500-row inbox costs about 16 KB per user — and enforce uniqueness on `(recipientId, postId)` so replay is harmless.",
           "Advance a per-post fan-out checkpoint only after each batch is durable; lag is observable and retry does not duplicate visible entries.",
+          "Materialize only into followers seen in the last 30 days and backfill a dormant follower on the open that brings them back, which removes the amplification spent on accounts that will never read the row.",
         ],
       },
       {
@@ -108,30 +109,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Given a feed where 99.9% of authors have fewer than 5,000 followers but the top 100 exceed 20 million, define the fan-out policy, event and inbox keys, retry boundary, and a migration plan when an author crosses the threshold.",
-    prerequisites: ["queues-and-streams", "replication-and-partitioning"],
+    prerequisites: ["caching-queues", "replication-partitioning"],
     relatedDesigns: ["classic-newsfeed"],
     quiz: [
       {
-        prompt: "Which mechanism most directly makes retried fan-out safe?",
+        prompt: "Which mechanism most directly makes a retried fan-out batch safe?",
         options: [
-          "A uniqueness constraint on recipient and post IDs",
-          "A longer cache TTL",
-          "Random worker selection",
-          "Ordering all authors in one partition",
+          "A unique index on the (recipientId, postId) pair",
+          "A longer TTL on the cached candidate page list",
+          "Ordering every author's posts in one partition",
+          "Randomly assigning each batch to a free worker",
         ],
         answerIndex: 0,
-        explanation: "A deterministic uniqueness key turns replay into an idempotent upsert; the other choices do not prevent duplicate effects.",
+        explanation: "A deterministic entry key turns replay into an idempotent upsert. The tempting wrong answer is per-author partition ordering: it keeps posts in sequence but does nothing to stop a retried batch from inserting the same inbox row twice.",
       },
       {
-        prompt: "Why is hybrid fan-out commonly used for celebrity authors?",
+        prompt: "Why do production feeds route celebrity authors to read-time merge?",
         options: [
-          "It guarantees global ordering",
-          "It moves extreme write amplification to a bounded read-time merge",
-          "It removes the need for caching",
-          "It makes the feed strongly consistent",
+          "It gives the feed one global ordering across authors",
+          "It makes every follower's feed strongly consistent",
+          "It bounds publish amplification with a read-time merge",
+          "It removes the need to cache celebrity timelines at all",
+        ],
+        answerIndex: 2,
+        explanation: "Merging the high-fan-out tail at read time keeps one publish from creating an unbounded materialization burst. The misconception in the last option is that pulling removes caching work; the write hotspot simply becomes a read hotspot, so those timelines need replicated caches and request coalescing.",
+      },
+      {
+        prompt: "An author with 20 million followers posts once. Under pure fan-out on write, what does that single publish cost?",
+        options: [
+          "One inbox write, expanded lazily at read time",
+          "Twenty million inbox writes, one per follower",
+          "One write per follower shard, so a few hundred",
+          "Roughly 5,000 writes, the median follower count",
         ],
         answerIndex: 1,
-        explanation: "Read-time merging for the high-fan-out tail prevents a single publish from creating an unbounded materialization burst.",
+        explanation: "Write-time materialization is linear in follower count, so one post becomes 20 million inbox rows. The shard-count option encodes the common error that sharding shrinks the work; sharding only spreads the same 20 million writes across more workers.",
+      },
+      {
+        prompt: "Publish latency looks normal, but fan-out lag and worker saturation spike for a handful of authors. What is the diagnosis?",
+        options: [
+          "The read-time merge fetches too many author heads",
+          "The post store is undersized for peak publish volume",
+          "Candidate-cache TTLs are too long for those authors",
+          "Follower expansion for high-fan-out authors saturates",
+        ],
+        answerIndex: 3,
+        explanation: "Normal publish latency shows the author transaction committed fine, so the backlog is in the asynchronous expansion of a few enormous follower sets. Blaming the post store is the classic misread: fan-out runs outside that transaction, so its saturation never shows up as slow writes.",
       },
     ],
     recallCards: [
@@ -145,12 +168,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 2,
     tier: 1,
     title: "Feed Ranking, Caching, and Pagination",
-    eyebrow: "Week 2 · Read-heavy systems",
+    eyebrow: "Stable pages over shifting data",
     estimatedMinutes: 80,
     summary:
       "Build a stable, low-latency feed from candidate IDs, mutable ranking signals, layered caches, and opaque cursors that survive concurrent inserts.",
     whyItMatters:
-      "A feed is not complete when candidates exist. The interview signal comes from explaining hydration, freshness, invalidation, pagination stability, and the contract between ranking and storage.",
+      "Page one and page two are two separate queries against data that moved in between. A post inserted at the top shifts every offset by one, so `OFFSET 30` re-serves an item the reader already scrolled past, and a rescore between the two requests can drop another one entirely. Everything here — what the cursor encodes, why the policy version is part of the cache key, why a deletion tombstone jumps the invalidation queue — exists so the second query answers the same question the first one did.",
     objectives: [
       "Separate candidate generation, ranking, hydration, and policy filtering into measurable stages.",
       "Design cache keys and invalidation paths that preserve deletes and access changes.",
@@ -171,9 +194,10 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Candidate-to-render pipeline",
         summary: "Keep feed IDs and ranking metadata separate from mutable post bodies and viewer-specific policy checks.",
         points: [
-          "Generate more candidates than one page, filter blocked or deleted content, rank the remainder, then hydrate only selected IDs.",
-          "Version ranking features and model/config snapshots so a bad rollout can be diagnosed and rolled back.",
-          "Carry stage budgets for candidate fetch, rank, hydrate, and render; a total latency target without sub-budgets hides the bottleneck.",
+          "Generate three to five times a page of candidates — around 150 for a 30-item page — so block, privacy, and deletion filtering can remove a fifth of them without a second round trip to storage.",
+          "Hydrate only the IDs that survived ranking. Hydrating all 150 candidates to render 30 multiplies post-store reads fivefold for results nobody will see.",
+          "Split the 300 ms p99 into named stage budgets — 120 ms to fetch candidates, 60 ms to rank, 90 ms to hydrate, leaving 30 ms for render and transit — because a single end-to-end target tells you the page was slow and never which stage regressed.",
+          "Version ranking features and the model or config snapshot that produced a page, so a relevance complaint can be traced to a rollout and rolled back rather than argued about.",
         ],
       },
       {
@@ -246,30 +270,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Specify `GET /feed` for a ranked feed: define the cursor payload, supporting index, cache hierarchy, deletion path, and behavior when the ranking policy changes between page one and page two.",
-    prerequisites: ["classic-feed-fanout", "caching"],
+    prerequisites: ["classic-feed-fanout", "caching-queues"],
     relatedDesigns: ["classic-newsfeed"],
     quiz: [
       {
-        prompt: "What makes a chronological cursor safe when timestamps collide?",
+        prompt: "What makes a chronological cursor safe when many posts share a timestamp?",
         options: [
-          "A larger page size",
-          "A unique secondary tie-breaker such as post ID",
-          "A shorter cache TTL",
-          "Offset pagination",
+          "A larger page size so collisions fall inside it",
+          "A shorter TTL on the cached candidate page list",
+          "An offset that skips the rows already returned",
+          "A unique tie-breaker such as post ID in the key",
         ],
-        answerIndex: 1,
-        explanation: "The query boundary needs a total order; `(createdAt, postId)` is stable even when many posts share a timestamp.",
+        answerIndex: 3,
+        explanation: "The query boundary needs a total order, and `(createdAt, postId)` stays strict even when timestamps collide. The offset option encodes the belief that OFFSET is equivalent to a keyset predicate; offsets shift whenever rows are inserted, so they both duplicate and skip.",
       },
       {
-        prompt: "Which cache entry generally has the broadest safe reuse?",
+        prompt: "Which cache entry has the broadest safe reuse across viewers?",
         options: [
-          "A viewer's fully ranked first page",
-          "An immutable public post fragment",
-          "A viewer's block-list result",
-          "A mutable presence record",
+          "A viewer's fully ranked and hydrated first page",
+          "An immutable public post fragment, keyed by ID",
+          "A viewer's block-list and privacy filter result",
+          "A per-device presence record with a short lease",
         ],
         answerIndex: 1,
-        explanation: "Immutable public fragments are neither viewer-specific nor frequently invalidated, so they can be shared broadly.",
+        explanation: "An immutable fragment is neither viewer-specific nor frequently invalidated, so one copy serves everyone. The ranked first page is the tempting answer because it saves the most work per hit, but it is keyed by viewer and policy version, giving it near-zero reuse and a large invalidation surface.",
+      },
+      {
+        prompt: "A feed page has a 300 ms p99 budget: candidate fetch 120 ms, rank 60 ms, hydrate 90 ms. What is left?",
+        options: [
+          "30 ms for render and network overhead",
+          "270 ms, because the stages run in parallel",
+          "0 ms; the stages already sum to the budget",
+          "150 ms, measured from the slowest stage",
+        ],
+        answerIndex: 0,
+        explanation: "120 + 60 + 90 = 270 ms, leaving 30 ms of the 300 ms budget for render and transit. The parallel option encodes the misconception that stage budgets overlap; candidates must exist before ranking and ranking before hydration, so these budgets add rather than max.",
+      },
+      {
+        prompt: "A blocked author's posts keep appearing for one viewer even though the block is committed in the source of truth. What fixes it?",
+        options: [
+          "Raise the TTL so pages are refreshed less often",
+          "Add request coalescing to the candidate fetch",
+          "Recheck access at hydration and push a tombstone",
+          "Cache rendered pages instead of candidate IDs",
+        ],
+        answerIndex: 2,
+        explanation: "Cached candidate lists are a hint about ordering, never the authority on visibility, so authorization has to be re-evaluated during hydration and urgent changes pushed as tombstones. Coalescing is the tempting pick because it is the other famous cache remedy, but it addresses stampedes and leaves stale policy exactly as stale.",
       },
     ],
     recallCards: [
@@ -283,12 +329,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 3,
     tier: 1,
     title: "Real-Time Connection Architecture",
-    eyebrow: "Week 2 · Real-time systems",
+    eyebrow: "Connections are state, not calls",
     estimatedMinutes: 75,
     summary:
       "Operate persistent client connections through stateless-enough gateways, leased routing state, bounded buffers, heartbeats, and controlled reconnect behavior.",
     whyItMatters:
-      "Chat designs often fail at the connection layer before message storage. Senior answers distinguish connection count from request QPS and reason about file descriptors, memory, routing, and slow consumers.",
+      "Two million idle sockets are two million file descriptors, TLS sessions, and outbound buffers that exist whether or not anyone is typing, so a fleet sized from message rate will be an order of magnitude short. The connection tier runs out of the resources nobody put in the estimate — per-socket memory, heartbeat writes, and the reconnect burst that arrives the instant one zone disappears.",
     objectives: [
       "Choose long polling or WebSockets from traffic shape and delivery requirements.",
       "Route events to a user's active connections without making one gateway a permanent source of truth.",
@@ -318,9 +364,18 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Capacity and lifecycle",
         summary: "Connection capacity is constrained by memory, descriptors, kernel buffers, TLS cost, and heartbeat traffic.",
         points: [
-          "Estimate concurrent connections separately from messages per second and leave headroom for rolling deploys and zone loss.",
-          "Drain an instance by refusing new sockets, notifying clients to reconnect with jitter, and waiting for a bounded grace period.",
-          "Use heartbeat intervals longer than ordinary network jitter but shorter than the acceptable ghost-session window.",
+          "Budget 30 to 60 KB per idle socket once TLS state, kernel read and write buffers, and application bookkeeping are counted, so 200,000 connections on one gateway is 6 to 12 GB of resident memory before a single message is queued.",
+          "Estimate concurrent connections separately from messages per second, and leave enough headroom that losing one zone of three still fits in the survivors rather than in the autoscaler's reaction time.",
+          "Pick the heartbeat interval as a capacity decision, not a liveness one: two million sockets on a 30-second interval is roughly 67,000 inbound frames per second of pure overhead, and doubling the interval halves that bill while doubling the ghost-session window.",
+          "Drain an instance by refusing new sockets, telling connected clients to reconnect with jitter, and waiting a bounded grace period before killing what remains.",
+        ],
+      },
+      {
+        title: "Handshake cost on the recovery path",
+        summary: "The expensive event is a connect, not a connection, and every displaced client performs one at the same moment.",
+        points: [
+          "Price the connect path separately: certificate exchange, token verification, and the session-directory write are all per-connect costs, and a zone loss presents the whole fleet's worth of them within a few seconds.",
+          "Cap accepted handshakes per second per gateway and answer the overflow with a retry-after hint, because rejecting a client early costs one round trip while accepting and then dropping it costs the full negotiation on both sides.",
         ],
       },
       {
@@ -362,7 +417,7 @@ export const classicTopics: RawStudyTopic[] = [
       {
         mode: "Stale connection routing",
         symptom: "Publishers repeatedly route to a dead gateway and online users appear unreachable.",
-        mitigation: "Use expiring leases, negative acknowledgements that evict stale routes, and client cursor catch-up.",
+        mitigation: "Use expiring leases, negative acknowledgments that evict stale routes, and client cursor catch-up.",
       },
       {
         mode: "Slow-consumer memory exhaustion",
@@ -384,30 +439,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design a gateway tier for two million concurrent chat connections. Estimate heartbeat load, specify the session-directory lease, define slow-client limits, and walk through a full-zone failure.",
-    prerequisites: ["networking", "queues-and-streams"],
+    prerequisites: ["networking", "caching-queues"],
     relatedDesigns: ["classic-chat"],
     quiz: [
       {
-        prompt: "Where should an accepted chat message live so a gateway crash does not lose it?",
+        prompt: "Where must an accepted chat message live before the sender gets a durable acknowledgment?",
         options: [
-          "Only in the socket buffer",
+          "In the gateway's per-socket outbound buffer",
           "In durable message storage or a durable log",
-          "Only in the session directory",
-          "In the load balancer cookie",
+          "In the session directory entry for the user",
+          "In a sticky-routing cookie on the balancer",
         ],
         answerIndex: 1,
-        explanation: "Gateways own transient connections; acceptance must cross a durable boundary before the client receives a durable acknowledgement.",
+        explanation: "Gateways own transient sockets, so acceptance has to cross a durable boundary before the client is told the message is safe. Picking the session directory reflects the misconception that it is durable state; it is soft, leased routing state that is deliberately allowed to go stale.",
       },
       {
-        prompt: "What is the safest response to a persistently slow consumer?",
+        prompt: "What is the safest policy for a socket that stays persistently behind?",
         options: [
-          "Grow its buffer without limit",
-          "Drop arbitrary chat messages",
+          "Grow its outbound buffer until it catches up",
+          "Silently drop the oldest durable chat frames",
+          "Block the event loop until the socket drains",
           "Disconnect it and resume from a durable cursor",
-          "Block the gateway event loop",
+        ],
+        answerIndex: 3,
+        explanation: "A bounded queue protects the whole gateway while cursor-based catch-up preserves durable delivery. Growing the buffer is the merciful-looking answer and is precisely how one class of slow client turns into fleet-wide memory exhaustion.",
+      },
+      {
+        prompt: "Two million sockets each send a heartbeat every 30 seconds. What steady rate must the tier absorb?",
+        options: [
+          "About 2 million heartbeats per second",
+          "About 33,000 heartbeats per second",
+          "About 67,000 heartbeats per second",
+          "About 60,000 heartbeats per second",
         ],
         answerIndex: 2,
-        explanation: "A bounded queue protects the fleet, while cursor-based recovery preserves durable message semantics.",
+        explanation: "2,000,000 divided by a 30-second period is roughly 67,000 heartbeats per second, which is why heartbeat interval is a capacity decision. The 2-million answer drops the interval entirely and reads concurrency as a per-second rate, the most common error in sizing a connection tier.",
+      },
+      {
+        prompt: "After a zone loss, handshake and authentication errors spike far above steady-state load. What is happening?",
+        options: [
+          "A reconnect storm; add backoff with jitter",
+          "Stale directory routes; evict them by lease",
+          "Slow consumers; enforce per-socket byte caps",
+          "Long-poll overhead; move to WebSockets now",
+        ],
+        answerIndex: 0,
+        explanation: "Every displaced client reconnects at once, so recovery traffic hits authentication and handshake paths together and must be spread with jittered backoff, retry hints, and reserved capacity. Stale routes are the tempting diagnosis since the directory really does hold dead entries after a zone loss, but that failure shows up as unreachable users, not a handshake spike.",
       },
     ],
     recallCards: [
@@ -421,15 +498,15 @@ export const classicTopics: RawStudyTopic[] = [
     day: 4,
     tier: 1,
     title: "Message Ordering, Delivery, and Multi-Device Sync",
-    eyebrow: "Week 2 · Real-time systems",
+    eyebrow: "Order within one conversation",
     estimatedMinutes: 85,
     summary:
       "Promise only per-conversation order, make at-least-once delivery harmless, and give every device a durable cursor for offline catch-up and receipt state.",
     whyItMatters:
-      "Messaging interviews test whether candidates separate acceptance, durability, delivery, and read state. Claims of global or exactly-once delivery usually hide unavailable coordination or duplicate effects.",
+      "Exactly-once delivery is not something a messaging system can buy; what it can build is a message that is harmless to deliver twice, and the client message ID, the per-conversation sequence, and the monotonic read watermark all exist to make the second copy indistinguishable from a no-op.",
     objectives: [
       "Define per-conversation sequence allocation and gap handling without depending on client clocks.",
-      "Model accepted, delivered, and read acknowledgements as distinct durable transitions.",
+      "Model accepted, delivered, and read acknowledgments as distinct durable transitions.",
       "Synchronize multiple devices through idempotent message IDs and monotonic cursors.",
     ],
     concepts: [
@@ -456,8 +533,9 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Delivery and receipt state",
         summary: "Durable acceptance is not the same event as delivery to a device or reading by a user.",
         points: [
-          "A durable acknowledgement means the message can be replayed; gateway push is an opportunistic low-latency path.",
+          "A durable acknowledgment means the message can be replayed; gateway push is an opportunistic low-latency path.",
           "Represent delivered state per device only if product requirements need it; aggregate read state as a monotonic per-user watermark when possible.",
+          "Cost the two representations before arguing about the UX: a 500-member group exchanging 1,000 messages a day generates 500,000 per-message receipt rows daily against 500 watermark rows, a thousandfold difference that grows with membership rather than with traffic.",
           "Publish receipt changes as idempotent events and reject watermark regressions caused by delayed devices.",
         ],
       },
@@ -521,31 +599,53 @@ export const classicTopics: RawStudyTopic[] = [
       "Keep read watermarks monotonic across devices.",
     ],
     exercise:
-      "Specify `sendMessage` and `syncMessages` for a multi-device chat client, including idempotency keys, sequence assignment, acknowledgement semantics, gap recovery, and read-watermark updates.",
-    prerequisites: ["classic-realtime-connections", "consistency-and-idempotency"],
+      "Specify `sendMessage` and `syncMessages` for a multi-device chat client, including idempotency keys, sequence assignment, acknowledgment semantics, gap recovery, and read-watermark updates.",
+    prerequisites: ["classic-realtime-connections", "consistency-idempotency"],
     relatedDesigns: ["classic-chat"],
     quiz: [
       {
-        prompt: "Which identifier should remain stable when a client retries a timed-out send?",
+        prompt: "Which identifier must stay stable when a client retries a timed-out send?",
         options: [
-          "Gateway instance ID",
-          "Client-generated message ID",
-          "Current TCP connection ID",
-          "Server wall-clock timestamp",
+          "The gateway instance ID handling the socket",
+          "The server wall-clock timestamp of the send",
+          "The client-generated message ID for the send",
+          "The TCP connection ID the retry arrives on",
         ],
-        answerIndex: 1,
-        explanation: "A stable client message ID lets storage return the original committed result after an ambiguous timeout.",
+        answerIndex: 2,
+        explanation: "Deduplication happens atomically with sequence assignment on `(conversationId, senderId, clientMessageId)`, so the retry returns the sequence already committed. Choosing the timestamp encodes the belief that time identifies a message; a retry carries a new time and device clocks disagree anyway.",
       },
       {
-        prompt: "What is a compact representation of read state in an ordered conversation?",
+        prompt: "What is the compact representation of read state in an ordered conversation?",
         options: [
           "A monotonic highest-read sequence per user",
-          "A random receipt for every reconnect",
-          "The gateway's local clock",
+          "A per-message, per-member receipt matrix",
           "An unbounded list of unread timestamps",
+          "The gateway's local clock at read time",
         ],
         answerIndex: 0,
-        explanation: "A monotonic watermark represents all messages through one sequence as read and naturally rejects stale regressions.",
+        explanation: "A watermark says everything through one sequence is read, so updates are idempotent and stale regressions are rejected by taking the maximum. The receipt matrix is tempting because it looks more precise, but its cost grows multiplicatively with group size and it is only justified by compliance or detailed group UX.",
+      },
+      {
+        prompt: "A 500-member group exchanges 1,000 messages a day. What does per-message receipt state cost versus watermarks?",
+        options: [
+          "500 rows versus 1,000; watermarks cost more",
+          "1,500 rows versus 500; the gap stays small",
+          "1,000 rows either way; both scale alike",
+          "500,000 rows versus 500 watermark rows",
+        ],
+        answerIndex: 3,
+        explanation: "Per-message, per-member receipts are 500 x 1,000 = 500,000 rows a day, while watermarks need one row per member. The 'both scale alike' option encodes the misconception that receipt cost tracks message volume alone and forgets the per-member multiplier that makes large groups explode.",
+      },
+      {
+        prompt: "A device receives sequence 43 before 42 in a conversation. What should it do?",
+        options: [
+          "Reassign sequences from the device clock",
+          "Buffer, refetch the range, then advance",
+          "Advance the cursor and drop the gap",
+          "Acknowledge 43 and re-request everything",
+        ],
+        answerIndex: 1,
+        explanation: "The durable cursor may only advance through contiguous sequences, so the client buffers briefly, requests the missing range, and then commits. Advancing past the hole is the tempting shortcut and loses message 42 permanently, because the cursor never looks backwards again.",
       },
     ],
     recallCards: [
@@ -559,12 +659,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 1,
     tier: 1,
     title: "Presence and Group Chat",
-    eyebrow: "Week 2 · Real-time systems",
+    eyebrow: "Soft truth, expiring by design",
     estimatedMinutes: 75,
     summary:
       "Treat presence as privacy-sensitive, expiring soft state while keeping group membership, messages, and authorization durable and versioned.",
     whyItMatters:
-      "Presence and groups combine high-churn ephemeral writes with large fan-out and security checks. The key is to avoid giving weak presence state authority over durable delivery or membership.",
+      "Presence is the cheapest data in the system and the easiest to let quietly become load-bearing: three million devices renewing a ten-second lease is 300,000 writes a second of information that nobody would miss if the whole tier vanished, which is exactly why it gets its own store, its own failure domain, and no authority over anything durable. The moment a send path consults presence before deciding to persist a message, an expired lease starts losing mail.",
     objectives: [
       "Aggregate device leases into bounded-staleness user presence.",
       "Scale group delivery without creating one durable message copy per online socket.",
@@ -586,6 +686,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Each active device renews an expiring lease; user presence is the aggregate of valid device leases.",
         points: [
           "Write heartbeats to a partition keyed by user, coalesce frequent renewals, and expire leases without a synchronous disconnect requirement.",
+          "Size the renewal rate before choosing the interval: three million devices on a 10-second lease is roughly 300,000 writes a second, so a store that would be comfortable at 30,000 forces either a longer lease or coarser aggregation, not more replicas.",
           "Publish only state transitions such as offline-to-online, not every heartbeat, to bound subscriber fan-out.",
           "Persist last-seen separately with a privacy policy because presence storage is intentionally ephemeral and may be lost.",
         ],
@@ -595,7 +696,8 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Persist one ordered group message, then route notifications or pointers to members and active devices.",
         points: [
           "Key the durable log by group and sequence; derive per-user inbox pointers only where unread or notification queries require them.",
-          "For large groups, partition recipients into fan-out batches and let online gateways fetch the canonical message body once.",
+          "One message to a million-member group is a single log append followed by a million delivery decisions. Batching recipients 10,000 at a time turns that into 100 checkpointed units of work that can be paced, retried, and deprioritized behind small conversations.",
+          "For large groups, let online gateways fetch the canonical message body once rather than shipping it through every fan-out batch.",
           "Apply per-group and per-sender quotas so one busy group cannot consume all delivery capacity.",
         ],
       },
@@ -664,26 +766,48 @@ export const classicTopics: RawStudyTopic[] = [
     relatedDesigns: ["classic-chat"],
     quiz: [
       {
-        prompt: "Why should presence use expiring leases rather than durable connect/disconnect truth?",
+        prompt: "Why does presence use expiring leases instead of durable connect and disconnect events?",
         options: [
           "Disconnect events are guaranteed to arrive",
-          "Clients can disappear without sending a disconnect",
-          "Leases provide strong global consistency",
-          "Leases eliminate heartbeat traffic",
+          "Leases give presence strong consistency",
+          "Leases remove heartbeat traffic entirely",
+          "Clients vanish without sending a disconnect",
         ],
-        answerIndex: 1,
-        explanation: "Crashes and partitions suppress disconnect events, so expiry gives a bounded stale-online window without requiring perfect failure detection.",
+        answerIndex: 3,
+        explanation: "Expiry bounds the stale-online window without requiring perfect failure detection, which no network provides. Believing the disconnect always arrives is exactly the mental model that produces ghost presence, because crashes and partitions suppress that event.",
       },
       {
-        prompt: "What should be durable for a large group message?",
+        prompt: "What must be durable when a message is sent to a very large group?",
         options: [
-          "One canonical group-log entry plus required delivery metadata",
-          "Only each gateway's socket buffer",
-          "One full body copy per online socket",
-          "Only an ephemeral presence event",
+          "One canonical group-log entry, keyed by sequence",
+          "One full durable body copy per online member socket",
+          "One copy in each gateway's outbound buffer",
+          "One ephemeral presence event per recipient",
         ],
         answerIndex: 0,
-        explanation: "A canonical log entry preserves order and recovery while pointers or notifications can be fanned out according to product needs.",
+        explanation: "A single ordered log entry preserves order and recovery, and pointers or notifications are derived from it only where unread queries need them. Copying the body per online socket is tempting for delivery speed, but it multiplies durable writes by device count and scatters the authority on ordering.",
+      },
+      {
+        prompt: "Three million devices renew a presence lease every 10 seconds. What write rate does the presence partition absorb?",
+        options: [
+          "About 3 million writes per second",
+          "About 30,000 writes per second",
+          "About 300,000 writes per second",
+          "About 10 writes per second per device",
+        ],
+        answerIndex: 2,
+        explanation: "3,000,000 renewals spread over a 10-second period is roughly 300,000 writes per second, which is why renewals are coalesced and only transitions are published to subscribers. The 3-million answer ignores the interval and treats every device as writing every second.",
+      },
+      {
+        prompt: "A removed member still fetches group attachments minutes after removal. What explains it?",
+        options: [
+          "The group log lost its ordering sequence",
+          "A signed capability outlives the revocation",
+          "Presence leases expired too slowly for them",
+          "Fan-out batches were too large to process",
+        ],
+        answerIndex: 1,
+        explanation: "Capability lifetime is the maximum revocation delay, so sensitive reads must be reauthorized against the current membership version and TTLs kept short. Blaming presence leases confuses ephemeral status with authorization; presence never grants access to anything.",
       },
     ],
     recallCards: [
@@ -697,12 +821,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 3,
     tier: 1,
     title: "Idempotent Workflows, Outbox, and Sagas",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "One commit, then publish",
     estimatedMinutes: 85,
     summary:
       "Turn a retried intent into one durable state transition, publish its event without a dual write, and coordinate multi-service work through an explicit saga state machine.",
     whyItMatters:
-      "Timeouts make commit outcomes ambiguous and brokers redeliver. Senior designs do not promise end-to-end exactly-once delivery; they place idempotency records, state, and outbox rows inside clear transaction boundaries.",
+      "A timeout tells the caller nothing about whether the order was placed, so retrying is a coin flip between a duplicate charge and a lost sale unless the idempotency key, the state transition, and the stored response all commit in one transaction — split them across two systems and you have rebuilt the dual write that the outbox was introduced to remove.",
     objectives: [
       "Define idempotency-key scope, request fingerprinting, retention, and atomic result storage.",
       "Use transactional outbox and consumer inbox patterns to bridge database state and at-least-once messaging.",
@@ -726,14 +850,16 @@ export const classicTopics: RawStudyTopic[] = [
           "Scope the key to caller and operation, store a request hash, and reject reuse with a different payload.",
           "Insert a pending record under a uniqueness constraint, apply the state transition, then store the canonical response before commit.",
           "On retry, return the committed response; if work is still pending, return its status rather than running a second effect.",
+          "Set retention from the longest window anything can replay through, not the shortest: if the client SDK retries for 24 hours but the broker replays for 7 days, a key expired on day two lets a redelivery on day five repeat the effect under an identifier nobody recognizes.",
         ],
       },
       {
         title: "Outbox and inbox delivery",
         summary: "A local transaction writes domain state and an event row; a separate relay publishes rows until acknowledged.",
         points: [
-          "Relay by polling ordered keys or reading change data, and mark or checkpoint only after broker acknowledgement.",
+          "Relay by polling ordered keys or reading change data, and mark or checkpoint only after broker acknowledgment.",
           "Expect publication duplicates after relay crashes; consumers atomically record event IDs with their local effects.",
+          "Alarm on the age of the oldest unpublished row rather than on row count. A relay that stopped 90 seconds ago and a relay draining a 50,000-row backlog at full speed look identical by depth and nothing alike by age.",
           "Retain outbox and inbox data long enough to cover maximum replay, then compact with audited watermarks.",
         ],
       },
@@ -798,30 +924,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design an order workflow that reserves inventory, authorizes payment, and schedules fulfillment. Draw every local transaction, outbox event, idempotency key, compensation, timeout, and manual-review state.",
-    prerequisites: ["consistency-and-idempotency", "queues-and-streams"],
+    prerequisites: ["consistency-idempotency", "caching-queues"],
     relatedDesigns: ["classic-payment-ledger", "classic-notifications"],
     quiz: [
       {
-        prompt: "Why can a transactional outbox publish the same event more than once?",
+        prompt: "Why can a transactional outbox still publish the same event more than once?",
         options: [
-          "The database cannot enforce uniqueness",
-          "The relay can crash after broker acknowledgement but before its checkpoint",
-          "Consumers always reorder partitions",
-          "The outbox does not use transactions",
+          "The database cannot enforce row uniqueness",
+          "The relay can crash after ack, before checkpoint",
+          "Consumers always reorder broker partitions",
+          "The outbox row gets written outside a transaction",
         ],
         answerIndex: 1,
-        explanation: "The acknowledgement/checkpoint boundary is not atomic across broker and database, so replay is expected and consumers must deduplicate.",
+        explanation: "The broker acknowledgment and the relay checkpoint are two systems with no shared transaction, so replay is expected and consumers deduplicate in their inbox. The last option states the very thing the outbox eliminates: the row commits with the domain change, which removes the dual write but not the duplicate.",
       },
       {
         prompt: "What should happen when an idempotency key is reused with a different request body?",
         options: [
-          "Execute the newer request",
-          "Average the two results",
-          "Reject it as a key conflict",
-          "Delete the original record",
+          "Execute the newer request under that key",
+          "Delete the original record and rerun it",
+          "Reject it as an idempotency key conflict",
+          "Return the stored response and ignore it",
         ],
         answerIndex: 2,
-        explanation: "Binding the key to a request fingerprint prevents accidental reuse from applying a different intent under an old identity.",
+        explanation: "The key is bound to a request fingerprint, so a changed payload is a caller bug and must surface as a conflict. Quietly returning the stored response is the tempting behavior because it looks idempotent, but it reports success for an intent that was never executed.",
+      },
+      {
+        prompt: "Clients retry for up to 24 hours and the broker can replay for 7 days. How long must idempotency keys be retained?",
+        options: [
+          "24 hours, the client retry window",
+          "8 days, the sum of both windows",
+          "1 hour, once the response is stored",
+          "7 days, the longest replay window",
+        ],
+        answerIndex: 3,
+        explanation: "Retention must cover the longest documented retry or replay window, so the 7-day broker replay sets the floor. Choosing 24 hours covers only the client, and expiring the key early lets a day-old redelivery repeat the business effect under a key nobody remembers.",
+      },
+      {
+        prompt: "Two concurrent retries of one request each applied the charge. Which detail was missing?",
+        options: [
+          "The claim was not a uniqueness-constrained insert",
+          "The broker delivered the events out of order",
+          "The consumer inbox retained events too long",
+          "The saga had no manual-review terminal state defined",
+        ],
+        answerIndex: 0,
+        explanation: "This is the check-then-act race: both requests read no record and proceeded, which only an atomic claim committed with the mutation prevents. Blaming broker ordering is the usual misdiagnosis, since the two requests were genuinely concurrent and no ordering guarantee would have separated them.",
       },
     ],
     recallCards: [
@@ -835,12 +983,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 2,
     tier: 1,
     title: "Payment State Machines and Immutable Ledgers",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "Money is an append-only fact",
     estimatedMinutes: 90,
     summary:
       "Separate an externally asynchronous payment state machine from an immutable, transactionally balanced double-entry ledger that records financial truth.",
     whyItMatters:
-      "Money systems must tolerate retries, webhook duplication, and uncertain provider outcomes while applying each financial effect once. Mutable balances without journal invariants are not an auditable source of truth.",
+      "A capture that times out has three possible truths — it happened, it did not, or it will in forty seconds — and the API has to answer the caller before knowing which. That is why the state machine carries a pending state that is not a failure, why every money-moving command is bound to an idempotency scope, and why the journal is append-only. A mutable balance can tell you what it holds now; it can never tell you which of the three actually occurred.",
     objectives: [
       "Model legal authorization, capture, settlement, refund, failure, and unknown transitions.",
       "Post balanced, immutable debit and credit entries in one database transaction.",
@@ -871,8 +1019,18 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "A journal transaction contains two or more entries where total debits equal total credits independently per currency.",
         points: [
           "Insert the journal header, all entries, and the payment transition atomically under a unique business-event ID.",
+          "Give every real-world component its own line. A 100.00 capture carrying a 3.00 processor fee posts three: debit merchant receivable 97.00, debit fee expense 3.00, credit customer payable 100.00, so 97.00 + 3.00 = 100.00 balances and the fee stays separately auditable instead of disappearing into a net figure.",
           "Derive account balances from journal entries or maintained aggregates; correct mistakes with reversing entries, never mutation.",
-          "Keep amount and currency integral and explicit, and forbid cross-currency balancing without a modeled exchange transaction.",
+          "Validate the balance invariant inside the same transaction that writes the entries, so an unbalanced posting is impossible to commit rather than something a nightly job discovers.",
+        ],
+      },
+      {
+        title: "Amounts, currencies, and rounding",
+        summary: "Money is an integer count of minor units, and every division has to name where the remainder lands.",
+        points: [
+          "Store 12.34 USD as the integer 1234 alongside an explicit currency code. Binary floating point cannot represent 0.10 exactly, and a three-way split of 10.00 leaves 3.33 each plus a cent that must be posted somewhere named rather than rounded away.",
+          "Refuse arithmetic across currencies: a 100.00 USD debit against an 85.00 EUR credit is not a balanced transaction. Conversion is its own modeled event recording the rate, its source, and the time it was quoted.",
+          "Fix the rounding rule per currency and per operation. JPY has no minor unit at all, so a 2.9 percent fee on 1,050 JPY comes to 30.45 and must resolve to a whole number of yen by a stated rule rather than by whatever the language's default happens to do.",
         ],
       },
       {
@@ -921,6 +1079,11 @@ export const classicTopics: RawStudyTopic[] = [
         symptom: "A refund and capture both succeed from an outdated payment version.",
         mitigation: "Use an explicit transition table and optimistic version check, then retry by re-reading current state.",
       },
+      {
+        mode: "Callback arrives before the local record exists",
+        symptom: "A provider webhook for an authorization lands while the originating request is still in flight, and the handler finds no payment row to advance.",
+        mitigation: "Key the callback inbox by provider request ID and persist the unmatched event, letting whichever side finishes second perform the join, instead of discarding a callback whose row has not committed yet.",
+      },
     ],
     interviewQuestions: [
       "What does the API return when the provider times out after receiving the request?",
@@ -936,30 +1099,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Model a partial capture followed by a partial refund: provide the payment transitions, journal transactions and entries, unique keys, provider timeout behavior, and correction path for a wrongly classified account.",
-    prerequisites: ["classic-idempotent-workflows-outbox-sagas", "storage-and-indexing"],
+    prerequisites: ["classic-idempotent-workflows-outbox-sagas", "storage-indexing"],
     relatedDesigns: ["classic-payment-ledger"],
     quiz: [
       {
-        prompt: "What is the correct response to an ambiguous provider timeout after authorization was sent?",
+        prompt: "The provider times out after the authorization was sent. What is the correct response?",
         options: [
-          "Mark it failed and immediately authorize again",
-          "Keep an unknown or pending state and query or reconcile by idempotent provider ID",
-          "Delete the payment row",
-          "Post both success and failure entries",
-        ],
-        answerIndex: 1,
-        explanation: "The provider may have committed the authorization; preserving uncertainty avoids a second financial effect while status is resolved.",
-      },
-      {
-        prompt: "How should a posted ledger error be corrected?",
-        options: [
-          "Update the original entry in place",
-          "Delete the journal transaction",
-          "Append a linked reversing or adjustment transaction",
-          "Change only the cached balance",
+          "Mark it failed and authorize again at once",
+          "Delete the payment row and let the client retry",
+          "Hold pending and resolve by provider ID",
+          "Post both a success and a failure entry",
         ],
         answerIndex: 2,
-        explanation: "Append-only corrections preserve the audit trail and keep every balance derivable from the journal.",
+        explanation: "The provider may already have committed the authorization, so uncertainty is preserved as an explicit state and resolved by idempotent query or reconciliation. Mapping timeout to failure is the named misconception in this module and is exactly what produces a duplicate authorization on the retry.",
+      },
+      {
+        prompt: "How should an error that has already been posted to the journal be corrected?",
+        options: [
+          "Update the original entry in place",
+          "Delete the whole journal transaction",
+          "Change only the materialized balance",
+          "Append a linked reversing transaction",
+        ],
+        answerIndex: 3,
+        explanation: "Append-only correction keeps every balance derivable from the journal and leaves the audit trail intact. Editing the materialized balance is tempting because it fixes the number a user sees, but that aggregate is a projection and would immediately disagree with the entries it is supposed to summarize.",
+      },
+      {
+        prompt: "A 100.00 capture carries a 3.00 processor fee. Which posting balances and records the fee explicitly?",
+        options: [
+          "Debit 100.00; credit 97.00, fee omitted",
+          "Debit 97.00 and 3.00; credit 100.00",
+          "Debit 100.00; credit 100.00 and 3.00",
+          "Debit 97.00; credit 97.00, fee netted",
+        ],
+        answerIndex: 1,
+        explanation: "Debits of 97.00 plus 3.00 equal credits of 100.00, and the fee gets its own line so it stays auditable. The third option adds the fee to the credit side with no matching debit and leaves the transaction 3.00 out of balance, the single most common posting error.",
+      },
+      {
+        prompt: "A capture and a refund both succeeded from the same payment version. What was missing?",
+        options: [
+          "A version compare-and-swap on the transition",
+          "A signed webhook from the payment provider",
+          "A longer retention window for provider IDs",
+          "A materialized balance on the cash account",
+        ],
+        answerIndex: 0,
+        explanation: "Each command must validate the current state and version and swap it atomically, so the loser re-reads instead of advancing stale state. Reaching for webhook signatures is the usual misdiagnosis: it confirms an external event is authentic and says nothing about two internal commands racing.",
       },
     ],
     recallCards: [
@@ -973,12 +1158,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 4,
     tier: 1,
     title: "Retries and Reconciliation",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "Ambiguity is the normal case",
     estimatedMinutes: 75,
     summary:
       "Retry only bounded transient work, quarantine poison messages, and reconcile independent records to discover silent loss, duplication, or disagreement.",
     whyItMatters:
-      "Retries repair many failures but amplify overload and cannot prove two systems agree. Reconciliation is the independent control loop that finds errors normal request paths cannot observe.",
+      "A retry is a bet that the failure was transient and that the dependency has room for one more request. During a partial outage both halves of that bet are usually wrong at the same moment. Reconciliation is the opposite instrument: it repairs nothing while the incident is running, and it is the only thing that will tell you a week later that the settlement file and the ledger disagree by eleven transactions nobody ever saw fail.",
     objectives: [
       "Classify transient, permanent, throttled, and ambiguous failures before retrying.",
       "Apply deadlines, exponential backoff, jitter, budgets, dead-letter handling, and safe redrive.",
@@ -1001,6 +1186,8 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Retry transient transport and throttling errors with capped exponential backoff and full jitter; honor server retry hints.",
           "Do not automatically retry validation or authorization failures, and resolve ambiguous commits through idempotent status lookup.",
+          "Count the waits, not just the calls. Against a 400 ms p99 dependency with 200 ms then 400 ms backoff, three attempts consume 400 + 200 + 400 + 400 + 400 = 1,800 ms, so a fourth attempt would return after a 2-second deadline has already expired.",
+          "Give exactly one layer in a call chain the right to retry. Three layers each retrying twice turns one client request into as many as 27 dependency calls, which is how a dependency at 90 percent capacity is handed an order of magnitude more load.",
           "Limit attempts and total elapsed time; one request's retry budget must fit inside the user-visible deadline.",
         ],
       },
@@ -1074,30 +1261,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Create a retry and reconciliation policy for payment capture: cover timeouts, throttling, validation failure, duplicate webhook, poison events, delayed settlement files, redrive, and manual review.",
-    prerequisites: ["classic-idempotent-workflows-outbox-sagas", "queues-and-streams"],
+    prerequisites: ["classic-idempotent-workflows-outbox-sagas", "caching-queues"],
     relatedDesigns: ["classic-payment-ledger", "classic-notifications"],
     quiz: [
       {
-        prompt: "What is the most effective way to avoid synchronized retry bursts?",
+        prompt: "What most effectively prevents synchronized retry bursts against a struggling dependency?",
         options: [
-          "Fixed zero-delay retries",
+          "Fixed-interval retries with zero delay",
+          "Unlimited attempts until it succeeds",
           "Capped exponential backoff with jitter",
-          "Infinite attempts",
-          "A larger response payload",
+          "A retry layer at every hop in the chain",
         ],
-        answerIndex: 1,
-        explanation: "Backoff reduces pressure and jitter spreads retries so clients do not reissue work in lockstep.",
+        answerIndex: 2,
+        explanation: "Backoff lowers the offered load while jitter breaks the lockstep that turns one blip into a storm. Retrying at every hop is the tempting answer because each layer looks locally reasonable, but attempts multiply along the chain, which is why one retry layer per call chain is the rule.",
       },
       {
-        prompt: "Why is reconciliation still needed when handlers are idempotent?",
+        prompt: "Why is reconciliation still required when every handler is already idempotent?",
         options: [
+          "It finds records two systems disagree on",
           "Idempotency guarantees every event arrives",
-          "It detects missing, delayed, or mismatched records across independent systems",
           "It makes external providers transactional",
-          "It replaces monitoring",
+          "It replaces dashboards and alerting entirely",
+        ],
+        answerIndex: 0,
+        explanation: "Idempotency stops an effect from being applied twice; it cannot prove a required effect happened at all, or that a counterparty recorded the same result. The second option is the precise confusion this module corrects, between at-most-once effects and at-least-once delivery.",
+      },
+      {
+        prompt: "A call has a 2-second deadline, the dependency's p99 is 400 ms, and backoff is 200 ms then 400 ms. How many attempts fit?",
+        options: [
+          "Five attempts, since the waits are free",
+          "Three attempts, about 1.8 s in total",
+          "Two attempts, if backoff is excluded",
+          "Unlimited; the deadline is advisory",
         ],
         answerIndex: 1,
-        explanation: "Idempotency prevents repeated effects; it cannot prove that a required effect occurred or that another system recorded the same result.",
+        explanation: "400 + 200 + 400 + 400 + 400 comes to 1,800 ms, so three attempts fit and a fourth would blow the deadline. The 'waits are free' option is the common error of counting only call time, and it is how a retry budget silently overruns the user-visible deadline.",
+      },
+      {
+        prompt: "Success metrics look healthy, yet internal and provider totals drift further apart each week. What detects this?",
+        options: [
+          "Longer client-side retry budgets",
+          "A circuit breaker on the provider call",
+          "Dead-letter queue depth alarms",
+          "Windowed reconciliation by watermark",
+        ],
+        answerIndex: 3,
+        explanation: "Only an independent comparison over a closed window, with missing, duplicate and mismatch classified separately, can see an effect that never happened. Dead-letter depth is the tempting proxy, but a diverged record usually never failed loudly enough to be dead-lettered in the first place.",
       },
     ],
     recallCards: [
@@ -1111,12 +1320,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 3,
     tier: 1,
     title: "Notification Orchestration",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "Earn the right to interrupt",
     estimatedMinutes: 80,
     summary:
       "Turn one durable notification intent into policy-compliant, prioritized, rate-limited delivery attempts across email, SMS, push, and in-app channels.",
     whyItMatters:
-      "Notification systems combine bursty fan-out, user preferences, schedules, unreliable providers, and duplicate risk. The design must preserve accepted intent without letting campaigns starve transactional traffic.",
+      "A ten-million-recipient digest and a two-factor code are the same API call with a different priority field, and the provider carrying both is capped at 5,000 sends per second. The digest owns that pipe for thirty-three minutes unless something structural stops it, so lanes, weighted fairness, and per-tenant token buckets are not tuning knobs — they are what keeps a login code from queueing behind a marketing campaign.",
     objectives: [
       "Separate notification intent, recipient planning, channel delivery, and provider callbacks.",
       "Apply preferences, quiet hours, deduplication, priority, and quotas at explicit stages.",
@@ -1137,7 +1346,7 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Intent and recipient planning",
         summary: "The API durably records intent before asynchronous expansion into recipient-channel deliveries.",
         points: [
-          "Validate template version, audience reference, schedule, priority, and idempotency key before committing intent and outbox rows.",
+          "Reject the request synchronously if the template version does not exist, the audience reference resolves to nothing, or the idempotency key has already been used with a different payload. Everything past this point runs asynchronously and has no way to report a validation error back to the caller.",
           "Expand large audiences in checkpointed batches and store a deterministic delivery key per recipient, channel, and intent.",
           "Evaluate consent, preferences, quiet hours, and channel eligibility near send time so scheduled work uses current policy.",
         ],
@@ -1147,7 +1356,8 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Channel queues isolate providers while fair scheduling protects transactional traffic and tenants.",
         points: [
           "Separate urgent transactional, normal, and bulk lanes, then apply weighted fairness rather than strict priority starvation.",
-          "Enforce global provider, tenant, campaign, and recipient token buckets before dispatch.",
+          "Size each lane against the provider's real ceiling: 10,000,000 digest recipients through a 5,000-per-second cap is 2,000 seconds of occupied pipe, so the bulk lane needs a stated backlog objective in tens of minutes rather than an autoscaling rule that converts the wait into throttle responses.",
+          "Enforce token buckets at every scope that can be abused independently — the provider account, the tenant, the campaign, and the individual recipient — because a per-provider limit alone still lets one tenant consume the whole allowance.",
           "Autoscale workers from oldest-ready age and provider headroom, not raw queue depth alone.",
         ],
       },
@@ -1180,6 +1390,12 @@ export const classicTopics: RawStudyTopic[] = [
         preferB: "Hold and reconcile after an ambiguous acceptance when duplicate user contact is unacceptable.",
         watch: "Two providers generally cannot share an atomic idempotency boundary.",
       },
+      {
+        decision: "What deduplication is keyed on",
+        preferA: "Key on the delivery tuple of intent, recipient, and channel when one event should legitimately reach a person on more than one channel.",
+        preferB: "Key on a logical event identity spanning channels when the person should hear about it once regardless of how they are reachable.",
+        watch: "The narrow key sends a push and an email for the same event; the wide key suppresses a genuinely second notification that merely shares an event type.",
+      },
     ],
     failureModes: [
       {
@@ -1196,6 +1412,11 @@ export const classicTopics: RawStudyTopic[] = [
         mode: "Provider outage amplification",
         symptom: "Retries and failover saturate alternate providers while queue age and throttle responses climb.",
         mitigation: "Circuit-break the failing adapter, honor rate limits, apply jitter and budgets, and degrade low-priority traffic first.",
+      },
+      {
+        mode: "Preference evaluated at planning, applied at send",
+        symptom: "Someone who unsubscribed hours ago still receives a scheduled digest that was expanded into deliveries before the opt-out landed.",
+        mitigation: "Re-read consent, quiet hours, and channel eligibility immediately before dispatch, and treat the planning-time snapshot as a cost filter rather than as the authority on permission.",
       },
     ],
     interviewQuestions: [
@@ -1216,26 +1437,48 @@ export const classicTopics: RawStudyTopic[] = [
     relatedDesigns: ["classic-notifications"],
     quiz: [
       {
-        prompt: "Which metric best indicates whether scheduled notifications are meeting their delivery objective?",
+        prompt: "Which metric shows whether scheduled notifications are meeting their delivery objective?",
         options: [
-          "Total queue capacity",
+          "Total configured queue capacity",
           "Oldest ready-item age by priority",
-          "Number of provider SDK methods",
-          "Template character count",
+          "Queue depth summed over lanes",
+          "Worker CPU utilization average",
         ],
         answerIndex: 1,
-        explanation: "Oldest ready age directly captures how late actionable work is; depth alone varies with batch size and throughput.",
+        explanation: "Oldest ready age states directly how late actionable work is, which is what the objective is written against. Queue depth is the tempting proxy, but it moves with batch size and throughput: a deep queue draining fast is fine, and a shallow stuck one is not.",
       },
       {
-        prompt: "Why can immediate failover after a provider timeout create duplicates?",
+        prompt: "Why can immediate failover after a provider timeout create duplicate user contact?",
         options: [
-          "The first provider may have accepted the request before its response was lost",
-          "Preferences cannot be cached",
-          "Queues always provide exactly-once delivery",
-          "SMS has no provider identifier",
+          "The first provider may have accepted it",
+          "Preferences cannot be cached anywhere at all",
+          "Queues here give exactly-once delivery",
+          "SMS carries no provider request ID",
         ],
         answerIndex: 0,
-        explanation: "A timeout is an ambiguous result; a second provider may deliver even though the first provider also committed the send.",
+        explanation: "A timeout is an ambiguous outcome, and two providers cannot share one atomic idempotency boundary, so the second send may duplicate a first that quietly succeeded. The exactly-once option is the belief this whole module rejects; brokers and providers deliver at least once.",
+      },
+      {
+        prompt: "A ten-million-recipient digest runs through a provider capped at 5,000 sends per second. How long is the bulk lane busy?",
+        options: [
+          "About 2 minutes with more workers",
+          "About 33 hours because of retries",
+          "Under a minute; the cap is per lane",
+          "About 33 minutes at the provider cap",
+        ],
+        answerIndex: 3,
+        explanation: "10,000,000 divided by 5,000 per second is 2,000 seconds, roughly 33 minutes, and that floor is set by the provider token bucket. 'More workers' is the standard misconception that autoscaling fixes a rate-limited path; extra workers only convert the wait into throttle responses.",
+      },
+      {
+        prompt: "Transactional delivery is healthy, but the oldest bulk item is now days old. What is the fix?",
+        options: [
+          "Raise the transactional lane priority",
+          "Circuit-break the failing adapter now",
+          "Give bulk a weighted capacity floor",
+          "Shorten the callback dedupe window",
+        ],
+        answerIndex: 2,
+        explanation: "Strict priority starves bulk indefinitely, so fairness weights, per-class capacity floors and an explicit backlog SLO are what let it progress. Raising transactional priority is the reflex and deepens the starvation, and circuit-breaking targets a provider outage that the healthy transactional lane already rules out.",
       },
     ],
     recallCards: [
@@ -1249,12 +1492,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 4,
     tier: 1,
     title: "Multipart and Content-Addressed File Storage",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "Let content name itself",
     estimatedMinutes: 85,
     summary:
       "Move large byte streams directly to object storage, verify resumable parts, and atomically commit a manifest of durable content-addressed chunks.",
     whyItMatters:
-      "File services must separate high-throughput blob transfer from strongly consistent metadata. Multipart upload, hashing, deduplication, and garbage collection introduce correctness and security boundaries interviewers expect you to name.",
+      "A 50 GB upload over a hotel network will not finish in one request, and a design that concedes this early looks nothing like one that does not: bytes go straight to object storage under narrowly scoped signed URLs, the application tier handles only part bookkeeping, and a single manifest commit is the instant the file exists. Get that boundary wrong and you are either proxying terabytes through servers sized for JSON, or letting a reader open a file that is still half uploaded.",
     objectives: [
       "Design resumable multipart upload with checksums, expiry, and an atomic commit point.",
       "Explain fixed versus content-defined chunks and safe content-addressed deduplication.",
@@ -1276,6 +1519,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "A metadata service creates an expiring session while clients upload parts directly to object storage.",
         points: [
           "Record expected part ranges, maximum size, uploader authorization, and session expiry before issuing narrowly scoped signed URLs.",
+          "Choose the part size as a retry-cost decision: at 8 MB, a 50 GB file is roughly 6,400 parts, so a dropped connection costs 8 MB of re-transfer instead of 50 GB. Halving the part size halves that loss and doubles manifest rows, hash work, request count, and eventual collection work.",
           "Verify each part's length and checksum, allowing safe overwrite of the same part number during retry.",
           "Commit only after all required parts are durable and verified; the commit transaction creates the immutable file-version manifest.",
         ],
@@ -1350,30 +1594,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design upload and download for a 50 GB file over an unreliable connection. Define session, part, chunk, and manifest records; retry behavior; verification; dedupe scope; commit; CDN authorization; and orphan cleanup.",
-    prerequisites: ["storage-and-indexing", "consistency-and-idempotency"],
+    prerequisites: ["storage-indexing", "consistency-idempotency"],
     relatedDesigns: ["classic-file-sync"],
     quiz: [
       {
-        prompt: "When should a new file version become visible?",
+        prompt: "At what point does a new file version become visible to readers?",
         options: [
-          "After the first part arrives",
-          "After an atomic manifest commit references all verified durable chunks",
-          "When a signed URL is issued",
-          "After garbage collection",
+          "As soon as the first part arrives",
+          "When the signed upload URL is issued",
+          "At the atomic manifest commit point",
+          "After garbage collection has swept",
         ],
-        answerIndex: 1,
-        explanation: "The manifest commit is the single metadata boundary that proves the full version is reconstructable.",
+        answerIndex: 2,
+        explanation: "The manifest commit is the one metadata boundary that proves every chunk is durable and verified, so the version is reconstructable. Treating the first durable part as visibility confuses object-storage durability with completeness: parts can be safely stored while the version is still a fragment.",
       },
       {
-        prompt: "What is a security risk of unrestricted global hash deduplication?",
+        prompt: "What is the security risk of unrestricted global hash deduplication?",
         options: [
-          "It removes all checksums",
-          "A caller may probe whether another tenant stores known content",
-          "It prevents multipart upload",
-          "It makes chunks larger",
+          "A caller can probe for known content",
+          "It removes checksums from all chunks",
+          "It prevents resumable multipart upload",
+          "It forces chunk sizes to grow larger",
+        ],
+        answerIndex: 0,
+        explanation: "Observable dedupe behavior becomes a content-existence oracle: uploading a known file and seeing an instant commit reveals another tenant already stores it. The checksum option confuses hashing used for naming with hashing used for verification; dedupe scope changes neither.",
+      },
+      {
+        prompt: "A 50 GB file is chunked at 8 MB. Roughly how many entries does one version's manifest carry?",
+        options: [
+          "About 640 manifest entries",
+          "About 64,000 manifest entries",
+          "About 50 entries, one per gigabyte",
+          "About 6,400 manifest entries",
+        ],
+        answerIndex: 3,
+        explanation: "50 GB divided by 8 MB is roughly 6,400 chunks, which is why metadata cost scales inversely with chunk size: shrink the chunk tenfold and manifest rows, hashes, requests and collection work all grow tenfold. The one-per-gigabyte option assumes chunks follow a display unit rather than the configured part size.",
+      },
+      {
+        prompt: "A live file version starts returning missing chunks shortly after a concurrent overwrite. What went wrong?",
+        options: [
+          "Part checksums were never verified",
+          "Deletion fired on a stale zero count",
+          "The signed download URL had expired",
+          "Content-defined chunking was in use",
         ],
         answerIndex: 1,
-        explanation: "Observable dedupe behavior can act as a content-existence oracle across authorization boundaries.",
+        explanation: "A delayed decrement can drive a count to zero while a new manifest still references the chunk, so collection needs grace epochs, a mark derived from canonical manifests, and a recheck immediately before deletion. Blaming checksums is tempting because the download fails verification, but the bytes were fine until they were reclaimed.",
       },
     ],
     recallCards: [
@@ -1387,12 +1653,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 1,
     tier: 1,
     title: "File Sync, Versioning, and Conflict Resolution",
-    eyebrow: "Week 3 · Stateful asynchronous systems",
+    eyebrow: "Divergence is expected, not exceptional",
     estimatedMinutes: 85,
     summary:
       "Synchronize metadata changes through an append-only cursor, require base-version compare-and-swap for writes, and preserve concurrent edits as explicit versions rather than silent overwrites.",
     whyItMatters:
-      "Offline devices create delayed, concurrent edits, moves, and deletes. A correct sync protocol separates byte transfer from namespace metadata and defines tombstone retention, cursor semantics, and conflict policy.",
+      "Two laptops, one file, ninety days apart: the protocol has to decide what a rename means when the other side deleted the parent folder, whether a returning device may resurrect content everyone else discarded, and which of two edits gets to be the file. None of those are byte-transfer questions, which is why the namespace, the change log, and the chunk store stay three separate problems that meet only at a version commit.",
     objectives: [
       "Design an append-only change log with stable cursors and snapshot recovery.",
       "Use version preconditions to detect concurrent edits, moves, and deletes.",
@@ -1432,8 +1698,18 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Deletion creates a retained tombstone, while chunk manifests make unchanged byte ranges reusable.",
         points: [
           "Retain tombstones longer than the supported offline window so an old device cannot resurrect deleted content silently.",
+          "Let retention set the resnapshot boundary explicitly: if devices may be offline for 90 days but tombstones compact at 30, every device returning after day 30 must be forced through a fresh snapshot, because its cursor now points into history that no longer records the deletions.",
           "Restore creates a new version linked to prior history and must resolve any current namespace name conflict.",
           "Compare chunk manifests and transfer only missing hashes; metadata commit still controls which full version is current.",
+        ],
+      },
+      {
+        title: "Shared folders and revoked access",
+        summary: "A subtree two accounts can both mount makes permission a version rather than a boolean.",
+        points: [
+          "Carry an ACL version on every node and check it when bytes are fetched, not only when the folder is listed, so a device holding a cached chunk manifest cannot keep downloading content after removal.",
+          "Express unsharing as a change-log record in the removed member's own namespace. Their client then learns to unmount the folder, rather than keeping a divergent copy it will eventually try to push back.",
+          "Decide once whether a removed member keeps their local files. Whatever the product answers, it has to be the same on every one of their devices and driven by a change record, not by whichever client happens to sync first.",
         ],
       },
     ],
@@ -1488,30 +1764,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Walk through two offline devices editing, renaming, and deleting the same file. Specify metadata versions, change-log records, cursor replay, conflict output, tombstone retention, and eventual convergence.",
-    prerequisites: ["classic-multipart-content-addressed-storage", "replication-and-partitioning"],
+    prerequisites: ["classic-multipart-content-addressed-storage", "replication-partitioning"],
     relatedDesigns: ["classic-file-sync"],
     quiz: [
       {
-        prompt: "What prevents an offline client from silently overwriting a newer file version?",
+        prompt: "What stops an offline client from silently overwriting a newer file version?",
         options: [
-          "A longer CDN TTL",
+          "A longer CDN TTL on downloads",
           "A base-version compare-and-swap",
-          "A smaller upload chunk",
-          "A random filename",
+          "A smaller upload chunk size",
+          "A last-writer-wins timestamp",
         ],
         answerIndex: 1,
-        explanation: "The version precondition turns concurrent modification into an explicit conflict rather than an unnoticed last write.",
+        explanation: "Committing against the version that was read turns concurrent modification into an explicit conflict the product can resolve. Last-writer-wins is the tempting simple rule and is precisely what discards the other device's work, while resting on clocks that disagree between devices.",
       },
       {
-        prompt: "What should happen when a device's sync cursor predates retained change history?",
+        prompt: "What should happen when a device's sync cursor predates the retained change history?",
         options: [
-          "Assume nothing changed",
+          "Assume nothing changed meanwhile",
           "Replay an arbitrary recent page",
-          "Fetch a fresh snapshot and resume from its watermark",
+          "Fetch a snapshot, resume from it",
           "Upload every local file as new",
         ],
         answerIndex: 2,
-        explanation: "Once incremental history is gone, only a consistent snapshot can establish a correct new baseline.",
+        explanation: "Once the incremental history behind the cursor is compacted, only a consistent snapshot plus its watermark establishes a correct baseline. Re-uploading everything is the tempting 'safe' move and it resurrects deleted nodes while duplicating the namespace.",
+      },
+      {
+        prompt: "Devices may be offline for up to 90 days but tombstones compact after 30. Which devices must be forced to resnapshot?",
+        options: [
+          "Any device offline more than 30 days",
+          "Any device offline more than 90 days",
+          "Only devices offline under 30 days",
+          "No device; the cursor always resumes",
+        ],
+        answerIndex: 0,
+        explanation: "Retention sets the boundary: at day 31 the cursor points past the surviving history, so incremental resume can no longer see the deletions. Assuming the cursor always resumes is the misconception behind stale-device resurrection, where a returning laptop re-uploads a file that every current device deleted.",
+      },
+      {
+        prompt: "A client reports it is fully synced yet permanently misses one change after a page failed midway. What happened?",
+        options: [
+          "Tombstone retention was set too short",
+          "Nodes were keyed by path, not by ID",
+          "Auto-merge ran on an opaque binary file",
+          "The cursor advanced past a partial page",
+        ],
+        answerIndex: 3,
+        explanation: "A cursor may only move after a contiguous page has been fully applied, so a partial apply must leave the high-water mark where it was and replay idempotently. Tombstone retention is the tempting neighbor failure, but it produces resurrected files rather than one change silently skipped forever.",
       },
     ],
     recallCards: [
@@ -1525,12 +1823,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 2,
     tier: 1,
     title: "Geo Indexing, Hot Regions, and Privacy",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Turn space into a key",
     estimatedMinutes: 85,
     summary:
       "Use an approximate spatial index to generate nearby candidates, filter by exact distance and eligibility, and bound freshness, hotspot, and location-privacy risk.",
     whyItMatters:
-      "Nearby search turns two-dimensional coordinates into skewed partitioned access. A good design explains cell boundaries, moving objects, downtown hotspots, stale positions, and deletion or retention obligations.",
+      "Two drivers 100 meters apart can land in different cells, and a query that trusts cell membership simply does not see one of them. Space refuses to partition cleanly. The index is only a candidate generator, exact spherical distance is the filter, and one downtown block will carry a thousand times the update rate of the county around it. Location is also the most re-identifying field most systems store, which puts precision, expiry, and deletion in the query path rather than in a retention policy nobody reads.",
     objectives: [
       "Compare geohash, quadtree, and database spatial indexes for radius and update workloads.",
       "Query neighboring cells and apply exact geometry to remove approximate-index false positives.",
@@ -1552,6 +1850,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Map each entity to one or more index cells, then cover a query radius with cells before exact filtering.",
         points: [
           "Choose cell precision so typical queries scan a bounded candidate set; include adjacent cells because radii cross cell boundaries.",
+          "Size the candidate budget against the cover, not the result limit: with roughly 1 km cells and a 1 km radius the cover is 9 cells — the query's own plus its 8 neighbors — and the exact distance test then discards a large share of what they return, since a square cover is always a superset of a circle.",
           "Fetch candidate IDs from covered cells, hydrate latest coordinates and eligibility, then compute exact spherical distance.",
           "Deduplicate overlapping-cell results. For best-effort live pagination, use `(distance, entityId)` and accept drift; when duplicates or omissions are unacceptable, pin a location snapshot or search-session candidate set and track seen entity IDs.",
         ],
@@ -1571,7 +1870,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Split dense cells recursively or add deterministic subshards; query all child shards while isolating their write load.",
           "Keep stable entity metadata separate from volatile location so each store can use an appropriate retention and replication policy.",
-          "Enforce authorization, purpose, precision reduction, expiry, and deletion before returning any location-derived result.",
+          "Check the caller's authorization and declared purpose before the query runs, round the returned coordinate down to the precision that purpose actually needs, and drop anything past its expiry. A result that is merely accurate is not the same as a result you are permitted to return.",
         ],
       },
     ],
@@ -1626,30 +1925,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design nearby-driver lookup for a dense city and a sparse region. Choose index precision, update coalescing, exact filtering, cursor, hotspot split, stale-location rule, and privacy retention.",
-    prerequisites: ["replication-and-partitioning", "storage-and-indexing"],
+    prerequisites: ["replication-partitioning", "storage-indexing"],
     relatedDesigns: ["classic-nearby-service"],
     quiz: [
       {
-        prompt: "Why is exact distance filtering still required after a geohash lookup?",
+        prompt: "Why is an exact distance filter still required after a geohash lookup?",
         options: [
-          "Geohashes encrypt coordinates",
-          "Grid cells are approximate and include points outside the radius",
-          "Distance cannot be indexed",
-          "It creates a global order",
+          "Geohashes encrypt the coordinates",
+          "Distance itself cannot be indexed",
+          "It gives results a global ordering",
+          "Cells include points outside radius",
         ],
-        answerIndex: 1,
-        explanation: "The index deliberately returns a superset; exact geometry removes false positives and enforces the requested radius.",
+        answerIndex: 3,
+        explanation: "A covering set of cells is a rectangle-shaped superset of a circular radius, so exact spherical distance is what actually enforces the query. 'Distance cannot be indexed' is the misconception that pushes people to skip candidate generation and scan every entity instead.",
       },
       {
-        prompt: "What is a robust response to a persistently hot spatial cell?",
+        prompt: "What is the robust response to a persistently hot spatial cell?",
         options: [
-          "Put every location in one larger cell",
-          "Recursively split or deterministically subshard the cell",
-          "Stop expiring locations",
-          "Trust client clocks for ordering",
+          "Merge all locations into one larger cell",
+          "Recursively split or subshard the cell",
+          "Stop expiring stale location rows",
+          "Order updates by the client clock",
         ],
         answerIndex: 1,
-        explanation: "Adaptive splitting spreads the exceptional region without forcing unnecessary fan-out everywhere else.",
+        explanation: "Adaptive splitting isolates the exceptional region and leaves sparse areas at a coarse precision, so only the hot area pays for extra fan-out. Coarsening into one bigger cell is the intuitive but backwards fix; it concentrates even more writes and candidates on the same partition.",
+      },
+      {
+        prompt: "Cells are roughly 1 km square and the query radius is 1 km. How many cells must the candidate scan cover?",
+        options: [
+          "One cell, the query point's own",
+          "Four cells, the nearest quadrant",
+          "Nine cells, the cell plus neighbors",
+          "Sixty-four cells at that precision",
+        ],
+        answerIndex: 2,
+        explanation: "A 1 km radius reaches into every adjacent cell, so the cover is the query cell plus its eight neighbors, deduplicated and then filtered by exact distance. Scanning only the query's own cell is the boundary-miss bug: an entity 100 meters away but across an edge simply disappears.",
+      },
+      {
+        prompt: "Nearby search keeps returning drivers who went offline minutes ago. Which stage is missing?",
+        options: [
+          "Hydrating freshness at query time",
+          "Neighbor-cell expansion on reads",
+          "Recursive splitting of dense cells",
+          "Version checks on location writes",
+        ],
+        answerIndex: 0,
+        explanation: "Cell postings are candidates only; eligibility, TTL and authorization have to be re-read from the authoritative record before anything is returned. Version checks are the tempting near-miss, since they do stop late events from regressing state, but they cannot tell you a driver has since gone offline.",
       },
     ],
     recallCards: [
@@ -1663,12 +1984,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 3,
     tier: 1,
     title: "Crawler Frontier, Politeness, and Deduplication",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Restraint is the hard part",
     estimatedMinutes: 85,
     summary:
       "Schedule a broad crawl through a host-aware frontier that obeys robots policy, limits per-origin load, canonicalizes URLs, and detects URL and content duplicates.",
     whyItMatters:
-      "A crawler is a distributed scheduler constrained by external systems it does not control. Coverage is meaningless if crawl traps explode the frontier or politeness violations harm origin servers.",
+      "Ten thousand fetchers and a one-request-per-second politeness rule against 2,000 eligible hosts means the crawl runs at 2,000 pages per second while 8,000 workers sit idle. That ratio is the entire design: throughput belongs to the host queue, never to the worker pool. The expensive mistake is a generated calendar that mints a million URLs resolving to nearly the same page, spending a budget that genuinely new hosts were queued behind.",
     objectives: [
       "Design a prioritized URL frontier with per-host eligibility time and bounded concurrency.",
       "Apply robots rules, canonicalization, redirect policy, and crawl-trap defenses before fetching.",
@@ -1707,7 +2028,7 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Duplicate and trap control",
         summary: "Normalize discovered URLs early, then fingerprint fetched content to detect aliases and mirrors.",
         points: [
-          "Canonicalize scheme, host, default ports, fragments, and safe parameter rules without merging semantically different URLs.",
+          "Normalize only the parts of a URL that cannot change what is served: lowercase the scheme and host, drop `:80` on http and `:443` on https, and discard the fragment. Leave query parameters alone unless a per-host rule marks one as tracking noise, because `?page=2` and `?page=3` are different documents.",
           "Treat a Bloom filter as a prefilter: on a definite negative, attempt an atomic insert into the definitive URL store; on a positive, consult that store before discarding the URL. Never exclude a URL from the Bloom result alone.",
           "Detect unbounded calendars, session parameters, repeated path shapes, and near-identical content; cap crawl depth and host expansion.",
         ],
@@ -1731,6 +2052,12 @@ export const classicTopics: RawStudyTopic[] = [
         preferA: "Use a central priority view for simple global policy at smaller scale.",
         preferB: "Partition by host to scale politeness state and prevent concurrent origin overload.",
         watch: "Global reprioritization is harder when work is distributed across host owners.",
+      },
+      {
+        decision: "Conditional refetch versus blind recrawl",
+        preferA: "Send `If-Modified-Since` or `If-None-Match` and accept a 304 when the goal is confirming freshness cheaply across a large known corpus.",
+        preferB: "Refetch unconditionally when a host's validators are unreliable, or when the parser changed and old bytes have to be reprocessed anyway.",
+        watch: "A 304 saves the body but not the request, so conditional recrawl buys bandwidth and buys nothing back from the per-host politeness budget.",
       },
     ],
     failureModes: [
@@ -1764,30 +2091,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design the frontier for one billion known URLs. Define host ownership, priority, robots caching, lease recovery, recrawl scheduling, canonicalization, duplicate stores, and crawl-trap controls.",
-    prerequisites: ["queues-and-streams", "networking"],
+    prerequisites: ["caching-queues", "networking"],
     relatedDesigns: ["classic-crawler-search"],
     quiz: [
       {
-        prompt: "Why should frontier work usually be partitioned by host?",
+        prompt: "Why is frontier work partitioned by host rather than spread freely across fetchers?",
         options: [
-          "To make page bodies smaller",
-          "To give one owner control of per-host concurrency and delay",
-          "To guarantee all pages rank equally",
-          "To avoid storing robots policy",
+          "To make fetched page bodies smaller",
+          "To rank every crawled page equally",
+          "To own per-host concurrency and delay",
+          "To avoid caching robots.txt at all",
         ],
-        answerIndex: 1,
-        explanation: "Host ownership serializes the politeness budget even when many fetchers operate concurrently.",
+        answerIndex: 2,
+        explanation: "One owner per origin serializes the politeness budget even when thousands of fetchers run concurrently, which no global throttle can do. The robots option inverts the design: host partitioning is precisely what lets a cached robots policy be authoritative in a single place.",
       },
       {
         prompt: "Why is a Bloom filter alone unsafe as the permanent URL source of truth?",
         options: [
-          "It cannot hash strings",
-          "False positives can cause uncrawled URLs to be discarded",
-          "It stores full page bodies",
-          "It always produces false negatives",
+          "It always yields false negatives",
+          "It cannot hash arbitrary strings",
+          "It stores whole page bodies too",
+          "False positives drop new URLs",
+        ],
+        answerIndex: 3,
+        explanation: "A positive can be wrong, so a URL that was never crawled would be silently excluded from coverage unless the definitive store confirms it. The 'always false negatives' option reverses the guarantee: Bloom filters never produce false negatives, which is exactly why a definite negative is safe to act on.",
+      },
+      {
+        prompt: "Politeness allows one fetch per second per host. With 10,000 fetchers and 2,000 eligible hosts, what caps throughput?",
+        options: [
+          "2,000 fetches per second, host-bound",
+          "10,000 per second, one per fetcher",
+          "12,000 per second, the two combined",
+          "5 fetches per second for each fetcher",
+        ],
+        answerIndex: 0,
+        explanation: "Per-host delay makes the eligible-host count the ceiling: 2,000 hosts times one fetch per second is 2,000 fetches per second, and the other 8,000 fetchers wait. Reading throughput off the fetcher count is the standard error, and 'fixing' those idle workers is how politeness violations get shipped.",
+      },
+      {
+        prompt: "One host's frontier cardinality explodes while its unique-content ratio collapses. What is happening?",
+        options: [
+          "Leases are expiring before fetch",
+          "A crawl trap generates URL aliases",
+          "Robots policy refreshed too often",
+          "Content fingerprints are disabled",
         ],
         answerIndex: 1,
-        explanation: "A Bloom filter may report a never-seen URL as present; definitive storage is needed when coverage loss matters.",
+        explanation: "Generated calendars, session parameters and repeating path shapes mint endless URLs that resolve to near-identical pages, so the answer is canonicalization, depth and expansion caps, and quarantine. Missing content fingerprints is the tempting half-answer: they catch the duplicate after the fetch, once the crawl budget is already spent.",
       },
     ],
     recallCards: [
@@ -1801,12 +2150,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 4,
     tier: 1,
     title: "Inverted Indexing, Incremental Serving, and Ranking",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Precompute the answer, then rank",
     estimatedMinutes: 90,
     summary:
       "Transform parsed documents into immutable inverted-index segments, publish coherent shard manifests, merge incrementally, and rank bounded candidate sets at query time.",
     whyItMatters:
-      "Search design tests storage layout, indexing freshness, immutable publication, shard fan-out, and ranking latency. Serving must remain coherent while segments, updates, and tombstones change continuously.",
+      "Nothing in a search index is ever edited. A deletion is a tombstone, an update is a newer document version, a flush is a new immutable file — so the only thing that actually changes is which set of files a query is allowed to look at. That one indirection is what lets indexing run continuously underneath a serving fleet, and it is also the source of merge debt, tombstone lag, and the awkward question of whether page two is reading the same index page one did.",
     objectives: [
       "Build term dictionaries and compressed postings with document IDs, frequencies, and optional positions.",
       "Index updates into immutable segments and publish versions atomically before background merge.",
@@ -1827,18 +2176,28 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Index construction",
         summary: "Parsers emit versioned documents that segment builders tokenize into term-to-document postings.",
         points: [
-          "Assign stable document IDs, normalize terms, and store frequency, field, and optional position data required by ranking and phrase queries.",
+          "Give every document a stable ID that survives recrawl, and normalize terms once at index time so the query analyzer can apply the identical transformation later. Store positions only when phrase queries need them, since positional data roughly doubles posting-list size.",
           "Sort and compress postings, write immutable segment files, then atomically register checksums and document-version coverage.",
           "Deduplicate ingestion by document and source version so event replay does not create multiple live versions.",
         ],
       },
       {
-        title: "Incremental publish and merge",
-        summary: "Small fresh segments become searchable quickly while compaction rewrites them into efficient larger segments.",
+        title: "Incremental publish",
+        summary: "Small fresh segments become searchable quickly, and a manifest swap is what makes them visible all at once.",
         points: [
           "Each shard publishes an immutable manifest only after its segments are durable. A query pins either a broker-issued vector with one manifest version per shard or a global manifest published after every referenced shard view is durable.",
           "Represent updates and deletes with newer document versions or tombstones, filtering obsolete postings at query time.",
-          "Merge segments by policy, preserve live newest versions, and delete old files only after no reader references their manifests.",
+          "Measure freshness document-to-searchable rather than flush-to-disk. A one-minute target with a 10-second flush interval leaves only about 50 seconds for parse, segment build, durability, and the manifest swap combined.",
+        ],
+      },
+      {
+        title: "Merge policy and compaction debt",
+        summary: "Compaction is a background efficiency job competing with indexing and serving for the same disk and CPU.",
+        points: [
+          "Merge in size tiers so any one document is rewritten a bounded number of times. Flushing every few seconds and merging naively can rewrite the same posting a dozen times before it reaches a stable segment.",
+          "Reserve compaction throughput instead of letting it run on whatever is left over. The moment ingestion outpaces merging, segment count grows, every query checks more files, and query CPU and indexing latency climb together.",
+          "Delete a merged-away file only when no live manifest references it and every query pinned to an older manifest has finished, so a 30-second query timeout sets the minimum grace period before removal.",
+          "Track merge debt — segments above the policy target — as a first-class metric, since it leads both the query-latency regression and the disk-exhaustion page by hours.",
         ],
       },
       {
@@ -1846,6 +2205,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "A broker parses the query, fans out to relevant shards, and merges each shard's top results.",
         points: [
           "Retrieve candidates through postings intersection or union, compute lexical scores, and return top-K with a unique tie-breaker.",
+          "Ask every shard for the full top K, not for its single best hit. A global top 10 across 50 document-sharded shards means the broker merges 500 candidates down to 10, and the cheaper one-per-shard version silently loses results whenever relevance clusters in one shard.",
           "Apply metadata, safety, and access filters before final results; cache only where query and policy scope permit.",
           "Bound shard fan-out and per-query work, return explicit partial status on replica loss, and paginate with a query-version cursor.",
         ],
@@ -1902,30 +2262,52 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Design incremental indexing and serving for a billion-document corpus with a one-minute freshness target. Specify segment creation, manifest publish, delete handling, merge policy, sharding, top-K merge, cursor, and partial failure.",
-    prerequisites: ["classic-crawler-frontier-politeness-dedupe", "storage-and-indexing"],
+    prerequisites: ["classic-crawler-frontier-politeness-dedupe", "storage-indexing"],
     relatedDesigns: ["classic-crawler-search"],
     quiz: [
       {
-        prompt: "What provides a coherent index view while new segments are published?",
+        prompt: "What gives queries a coherent index view while new segments are being published?",
         options: [
           "Overwriting segment files in place",
-          "An atomically selected immutable manifest",
-          "Client wall-clock time",
-          "A longer URL frontier",
+          "Client wall-clock time at query",
+          "A longer crawler URL frontier",
+          "An atomically swapped manifest",
         ],
-        answerIndex: 1,
-        explanation: "Readers pin one manifest whose referenced immutable files are already durable, preventing mixed or partial publication.",
+        answerIndex: 3,
+        explanation: "A query pins one manifest whose referenced immutable files are already durable, so nobody observes a half-published segment set. Overwriting in place is the mental model carried over from mutable databases, and it is what leaves readers pointing at files being rewritten beneath them.",
       },
       {
-        prompt: "What is a common cost of very frequent tiny segment publication?",
+        prompt: "What does very frequent publication of tiny segments cost?",
         options: [
-          "Lower query fan-out",
           "More segment checks and merge debt",
-          "Guaranteed global ranking",
-          "No tombstones",
+          "A lower per-query shard fan-out cost",
+          "Globally guaranteed ranking order",
+          "No need for tombstone filtering",
+        ],
+        answerIndex: 0,
+        explanation: "Small segments buy indexing freshness and pay for it in file count, per-query segment checks and compaction backlog. 'Lower fan-out' is exactly backwards, and that inversion is why teams keep lowering the flush interval until query CPU and merge debt climb together.",
+      },
+      {
+        prompt: "A query needs the global top 10 across 50 document-sharded shards. How many candidates does the broker merge?",
+        options: [
+          "10, since the shards agree on order",
+          "50, one best hit from each shard",
+          "500, ten from each of the 50 shards",
+          "Every match, then ranked centrally",
+        ],
+        answerIndex: 2,
+        explanation: "Relevance can be concentrated, so each shard must offer its own top 10 and the broker merges 50 x 10 = 500 candidates down to 10 with a unique tie-breaker. Taking one hit per shard is the classic error: it silently loses results whenever the best documents cluster in a single shard.",
+      },
+      {
+        prompt: "A deleted document is still returned minutes after removal. What is the fix?",
+        options: [
+          "Publish much larger, less frequent segments",
+          "Prioritize tombstones, filter by version",
+          "Increase the broker's shard fan-out",
+          "Return labeled partial results instead",
         ],
         answerIndex: 1,
-        explanation: "Tiny segments improve freshness but multiply files, query work, and background compaction.",
+        explanation: "A delete is a new document version, so the tombstone travels on a priority path and the query filters obsolete postings rather than waiting for physical removal. Waiting on compaction is the tempting answer and makes the deletion SLA worse, because merge is a background efficiency job and never a correctness path.",
       },
     ],
     recallCards: [
@@ -1939,12 +2321,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 1,
     tier: 1,
     title: "Observability Ingestion, Cardinality, and Retention",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Cardinality is the real budget",
     estimatedMinutes: 90,
     summary:
       "Collect metrics and logs through durable regional buffers, control tenant and label cardinality before indexing, and tier raw and aggregated data by retention value.",
     whyItMatters:
-      "An observability platform must stay available during the incidents it diagnoses. High-cardinality dimensions, bursty logs, compaction, and expensive queries make cost and backpressure part of correctness.",
+      "The platform is asked its hardest questions at the exact moment it is least able to answer them: log volume rises with the error rate, one new pod label turns 100,000 active series into 200 million, and every engineer opens the same dashboard at once, making it the most expensive query of the day. Cost is not a finance concern here; it decides whether the tool works when someone needs it.",
     objectives: [
       "Design agent, collector, durable-stream, storage, query, dashboard, and alert paths.",
       "Partition metrics and logs while enforcing tenant isolation, quotas, and cardinality limits.",
@@ -1974,6 +2356,7 @@ export const classicTopics: RawStudyTopic[] = [
         title: "Cardinality and indexing",
         summary: "Series identity is the metric name plus normalized labels; every unbounded label can multiply memory and index cost.",
         points: [
+          "Set the quota against the multiplication, not the label count: service (50) x endpoint (200) x status (10) is already 100,000 active series, and adding a pod label with 2,000 values makes it 200 million, because series identity is the whole label tuple.",
           "Enforce active-series and label-value quotas per tenant, and reject or rewrite unsafe dimensions such as request IDs.",
           "Use an inverted label index to find time-series IDs, then scan time-partitioned compressed sample blocks.",
           "Index a curated subset of log attributes; keep raw bodies in cheaper segments so arbitrary fields do not explode the index.",
@@ -1985,7 +2368,15 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Build idempotent time buckets with explicit late-data and out-of-order rules before marking a rollup complete.",
           "Retain raw, indexed, and aggregated tiers independently, and enforce tenant deletion across every tier and cache.",
-          "Route queries by time range and resolution, fan out with cost limits, and label partial results when a shard misses its deadline.",
+        ],
+      },
+      {
+        title: "Query cost and fair scheduling",
+        summary: "A dashboard refresh is an unbounded scan until something bounds it.",
+        points: [
+          "Charge a query in bytes scanned and series touched rather than in seconds, and reject a plan whose estimate exceeds the tenant's budget before it starts instead of killing it halfway through.",
+          "Cache by time bucket so a dashboard refreshing every 30 seconds re-reads one new bucket rather than rescanning the same 24-hour range 2,880 times a day.",
+          "Route by time range and resolution, and label a result partial when a shard misses its deadline. A silently truncated graph during an incident is worse than an error, because somebody will draw a conclusion from it.",
         ],
       },
     ],
@@ -2008,6 +2399,12 @@ export const classicTopics: RawStudyTopic[] = [
         preferB: "Block only when telemetry loss is less acceptable than propagating backpressure to the producer.",
         watch: "Unreported dropping creates false confidence; blocking can worsen the production incident being observed.",
       },
+      {
+        decision: "Scraped pull versus agent push",
+        preferA: "Scrape targets on a fixed interval when the platform should own discovery, timing, and the staleness semantics of every series.",
+        preferB: "Accept pushes when workloads are short-lived, network paths run one way, or the source sits outside the platform's discovery scope.",
+        watch: "Pull hands you a liveness signal for free — a target that stops answering is visibly absent — while push turns the same condition into silence you cannot distinguish from a healthy idle service.",
+      },
     ],
     failureModes: [
       {
@@ -2027,7 +2424,7 @@ export const classicTopics: RawStudyTopic[] = [
       },
     ],
     interviewQuestions: [
-      "At what boundary is an ingestion acknowledgement durable?",
+      "At what boundary is an ingestion acknowledgment durable?",
       "How does one request-ID label affect a time-series database?",
       "Which data remains after raw samples expire, and which queries become impossible?",
     ],
@@ -2039,31 +2436,53 @@ export const classicTopics: RawStudyTopic[] = [
       "Apply retention and deletion to raw, derived, indexed, cached, and cold data.",
     ],
     exercise:
-      "Design a multi-tenant pipeline for metrics and structured logs. Specify acknowledgement, partitions, cardinality quotas, indexes, raw and rollup retention, overload shedding, expensive-query controls, and self-monitoring.",
-    prerequisites: ["queues-and-streams", "storage-and-indexing"],
+      "Design a multi-tenant pipeline for metrics and structured logs. Specify acknowledgment, partitions, cardinality quotas, indexes, raw and rollup retention, overload shedding, expensive-query controls, and self-monitoring.",
+    prerequisites: ["caching-queues", "storage-indexing"],
     relatedDesigns: ["classic-observability-platform"],
     quiz: [
       {
-        prompt: "Why is a request ID usually unsafe as a metric label?",
+        prompt: "Why is a request ID unsafe as a metric label?",
         options: [
-          "It is not a string",
-          "It creates roughly one time series per request",
-          "It prevents batching logs",
-          "It forces UDP transport",
+          "Label values must not be strings",
+          "It stops logs from being batched",
+          "It makes one series per request",
+          "It forces UDP transport for agents",
         ],
-        answerIndex: 1,
-        explanation: "A near-unique label value multiplies active series and overwhelms indexes, memory, and storage.",
+        answerIndex: 2,
+        explanation: "Series identity is the metric name plus its normalized labels, so a near-unique value multiplies active series, index memory and compaction cost regardless of traffic. The batching option confuses transport efficiency with cardinality, and cardinality is the cost that actually breaks a time-series database.",
       },
       {
-        prompt: "What should an observability collector do if its buffer reaches a hard limit?",
+        prompt: "What should a collector do when its local buffer reaches a hard limit?",
         options: [
-          "Consume unbounded memory",
-          "Apply an explicit priority-aware drop or backpressure policy and count the loss",
-          "Acknowledge data it did not retain",
-          "Disable all quotas",
+          "Consume memory without a bound",
+          "Acknowledge data it did not keep",
+          "Disable per-tenant quotas first",
+          "Drop by priority and count it",
+        ],
+        answerIndex: 3,
+        explanation: "A bounded, accounted overload policy protects the application being observed and turns telemetry loss into a number someone can see. Acknowledging data that was never retained is the tempting way to keep producers quiet, and it manufactures false confidence during the exact incident the platform exists to diagnose.",
+      },
+      {
+        prompt: "A metric carries service (50 values), endpoint (200) and status (10). Adding a pod label with 2,000 values gives how many series?",
+        options: [
+          "102,000 active series total",
+          "200 million active series",
+          "2,000 active series total",
+          "100,000 series, pod excluded",
         ],
         answerIndex: 1,
-        explanation: "A bounded, observable overload policy protects production and makes telemetry gaps visible rather than silently corrupting trust.",
+        explanation: "Labels multiply, so 50 x 200 x 10 = 100,000 series becomes 200 million once a 2,000-value pod label joins the tuple. The additive options encode the widespread belief that a new label just adds its own values; series identity is the whole tuple, which is how one unbounded dimension ends a cluster.",
+      },
+      {
+        prompt: "A tenant's deleted data still appears on a dashboard fed by rollups. What went wrong?",
+        options: [
+          "Deletion never reached derived tiers",
+          "The label index was far too narrow",
+          "The collector spool had overflowed",
+          "Query fan-out exceeded its cost cap",
+        ],
+        answerIndex: 0,
+        explanation: "Every derived tier - raw, indexed, aggregated, cached and cold - holds an independent copy, so deletion has to be tracked across all of them and verified by audit scan. Blaming the collector spool is the tempting incident-shaped answer, but overflow loses data rather than preserving data that was supposed to be gone.",
       },
     ],
     recallCards: [
@@ -2077,12 +2496,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 2,
     tier: 1,
     title: "SLOs, Backpressure, and Graceful Degradation",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Choose what to shed first",
     estimatedMinutes: 80,
     summary:
       "Translate user outcomes into SLIs and error budgets, then bound admission and queues so overload triggers intentional degradation instead of uncontrolled collapse.",
     whyItMatters:
-      "Reliability discussion is strongest when it connects a measurable user promise to load shedding, dependency budgets, retry policy, and a product-safe degraded mode.",
+      "99.9 percent over 30 days is about 43 minutes of badness the product has agreed to spend, and writing that number down changes the argument from whether the system is reliable enough into what the 43 minutes are being spent on. Everything else follows from it: a budget implies a burn rate, a burn rate decides which alerts are allowed to wake someone, and an overload policy is just deciding in advance which half of the product gets dropped so the other half stays inside the number.",
     objectives: [
       "Define latency, availability, correctness, and freshness SLIs with valid-event populations.",
       "Use error budgets and burn-rate alerts to distinguish urgent incidents from normal variance.",
@@ -2113,6 +2532,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "The allowed bad-event fraction guides release pace and multi-window burn alerts.",
         points: [
           "Calculate remaining budget over the objective window and show both fast-burn and slow-burn rates.",
+          "Do the arithmetic once so the alert thresholds mean something: 0.1 percent of the 43,200 minutes in 30 days is roughly 43 minutes of bad events, and burning at 14 times the sustained rate would exhaust the whole month in about two days, which is what makes that rate worth a page.",
           "Page on actionable rapid exhaustion; create lower-urgency work for sustained slow burn.",
           "Combine symptom alerts with queue age, saturation, and dependency signals for diagnosis, not as substitutes for the SLO.",
         ],
@@ -2123,7 +2543,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Reject early using tenant, priority, and cost-aware admission before scarce workers or database connections are consumed.",
           "Propagate deadlines and backpressure; cap queues by age and bytes, and avoid retries at multiple layers.",
-          "Define degraded outputs in advance: stale cache, reduced ranking, delayed analytics, or disabled optional fan-out while protecting correctness.",
+          "Write the degraded modes down before the incident and put them in order: serve the cache past its TTL first, then swap personalized ranking for a popularity fallback, then defer analytics writes, and disable optional fan-out last — while every correctness-critical check keeps running untouched.",
         ],
       },
     ],
@@ -2184,24 +2604,46 @@ export const classicTopics: RawStudyTopic[] = [
       {
         prompt: "Which is the best availability SLI for a user-facing read API?",
         options: [
-          "Average CPU utilization",
-          "The fraction of valid requests returning a correct response within the latency threshold",
-          "Number of deployed hosts",
-          "Total log volume",
-        ],
-        answerIndex: 1,
-        explanation: "The ratio measures the actual user outcome and includes both errors and responses too slow to be useful.",
-      },
-      {
-        prompt: "When should a system reject new work rather than queue it?",
-        options: [
-          "When predicted queue delay exceeds the request's value or deadline",
-          "Only after memory is exhausted",
-          "Whenever cache hit rate is high",
-          "Never, because queues guarantee recovery",
+          "Good responses over valid requests",
+          "Average CPU across the whole fleet",
+          "Count of currently deployed hosts",
+          "Total application log volume",
         ],
         answerIndex: 0,
-        explanation: "Work that will time out wastes scarce capacity and extends recovery; early rejection keeps the system responsive.",
+        explanation: "The ratio counts the user outcome, so both an error and a response too slow to be useful register as bad events. Average CPU is the classic internal proxy: a fleet can sit at 40 percent utilization while an entire cohort of users is timing out.",
+      },
+      {
+        prompt: "When should a system reject new work instead of queueing it?",
+        options: [
+          "Only after memory is exhausted",
+          "Whenever cache hit rate is high",
+          "Never, because queues ensure recovery",
+          "When queue delay beats the deadline",
+        ],
+        answerIndex: 3,
+        explanation: "Work that will time out before it is served consumes scarce capacity and lengthens recovery, so admission control declines it early with a retry hint. Waiting for memory exhaustion is the tempting threshold and arrives far too late, once the queue is full of requests whose callers already gave up.",
+      },
+      {
+        prompt: "A read API has a 99.9 percent availability SLO over 30 days. How large is the error budget?",
+        options: [
+          "About 7.2 hours in the window",
+          "About 4.3 minutes in the window",
+          "About 43 minutes in the window",
+          "About 8.6 hours in the window",
+        ],
+        answerIndex: 2,
+        explanation: "0.1 percent of 43,200 minutes is roughly 43 minutes of bad events, which is the quantity burn-rate alerts are measured against. The 4.3-minute option slips a decimal by reading the objective as 99.99 percent, and that one digit changes what the team is allowed to spend by a factor of ten.",
+      },
+      {
+        prompt: "Mean latency and host uptime look normal while one customer cohort keeps missing the objective. What exposes it?",
+        options: [
+          "Alert on average request latency",
+          "Percentiles by slice, burn alerts",
+          "Add more hosts to the read pool",
+          "Raise the queue depth threshold",
+        ],
+        answerIndex: 1,
+        explanation: "An SLI is event-level over valid events, so per-slice thresholds and percentiles plus multi-window burn alerts are what reveal a cohort the aggregate hides. Alerting on average latency is the very instrument that created the blind spot, since a healthy mean is compatible with a badly broken tail.",
       },
     ],
     recallCards: [
@@ -2215,12 +2657,12 @@ export const classicTopics: RawStudyTopic[] = [
     day: 3,
     tier: 1,
     title: "Multi-Region Design and Disaster Recovery",
-    eyebrow: "Week 4 · Geo, search, and operations",
+    eyebrow: "Where truth lives during failover",
     estimatedMinutes: 90,
     summary:
       "Place traffic and data across regions according to consistency and latency needs, fence failover to prevent split brain, and prove recovery through explicit RPO, RTO, restore, and failback procedures.",
     whyItMatters:
-      "Multi-region diagrams are easy; correct ownership and recovery are not. Interviewers look for replication lag, conflict policy, regional dependencies, disaster detection, backups, and the dangerous path back to normal.",
+      "Replication running 45 seconds behind means promoting the standby discards up to 45 seconds of acknowledged writes, whatever the recovery objective says on paper. Failover is the least-rehearsed path in the system, exercised under the worst conditions, with cold caches and a standby whose capacity drifted below production sometime last quarter. The return trip is harder still, because by then both regions hold writes the other has never seen. The question worth answering is not how many regions exist but which one owns each invariant, and what evidence has to exist before that ownership moves.",
     objectives: [
       "Choose active-passive, active-active, or home-region ownership per data invariant.",
       "Explain global routing, replication, fencing, failover, conflict handling, and failback.",
@@ -2242,17 +2684,27 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Route reads and writes only after deciding which region owns each consistency domain.",
         points: [
           "Use a home region or single leader for strongly ordered keys; route or proxy writes there while serving safe local replicas when allowed.",
+          "Let the round trip set the ceiling: New York to London is about 70 ms, so any write that waits for a remote acknowledgment pays 70 ms before local work begins, and a request making two such hops has spent 140 ms of its budget on geography alone.",
           "Use active-active local writes only with a defined merge rule, commutative operation, or partitioned ownership that preserves invariants.",
           "Keep region routing metadata small, replicated, and versioned; clients and edges must tolerate stale placement information.",
+        ],
+      },
+      {
+        title: "Hidden cross-region dependencies",
+        summary: "A region is independent only if everything on its critical path also lives inside it.",
+        points: [
+          "Walk the standby's request path and name every call that leaves the region. An identity service, a feature-flag store, a license check, or a config bucket still hosted in the failed region each turn a survivable outage into a total one.",
+          "Audit the control plane too. Deploy pipelines, secret issuance, DNS management, and the dashboard an operator would use to run the failover are the components most often hosted only where the incident is.",
+          "Prove independence by blocking the primary region at the network level rather than by reading a diagram, because the dependency nobody documented is precisely the one the diagram omits.",
         ],
       },
       {
         title: "Failover and fencing",
         summary: "Promotion requires evidence that the old writer cannot continue, not only evidence that it looks unreachable.",
         points: [
-          "Acquire a higher epoch or fencing token from an independent quorum before the standby accepts writes.",
+          "Acquire a higher fencing token (also called a fencing epoch) from an independent quorum before the standby accepts writes.",
           "Measure and disclose replication lag so operators know the potential data loss before promotion.",
-          "Storage rejects new mutation commands carrying a stale epoch. Establish a committed cutover log position, drain or replay pre-cutover events, and never discard a committed event solely because its epoch predates the current writer.",
+          "Storage rejects new mutation commands carrying a stale fencing token. Establish a committed cutover log position, drain or replay pre-cutover events, and never discard a committed event solely because its fencing token predates the current writer.",
         ],
       },
       {
@@ -2261,7 +2713,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Derive backup frequency and replication mode from RPO, and automate restore measurement against RTO.",
           "Store backups in a separate failure and access domain, verify checksums, and run application-level invariant checks after restore.",
-          "Before failback, reconcile divergent writes, seed the recovered region, reverse replication safely, and change ownership through a new fenced epoch.",
+          "Treat failback as a second failover requiring the same evidence: reconcile whatever the recovered region wrote before it was fenced, seed it from the current owner, and let replication run in the new direction long enough to show lag is bounded. Only then issue a fresh fencing token and move ownership, because reusing the old one re-admits the writer you fenced.",
         ],
       },
     ],
@@ -2284,12 +2736,18 @@ export const classicTopics: RawStudyTopic[] = [
         preferB: "Require confirmation for money or ambiguous split-brain conditions where wrong promotion is worse than downtime.",
         watch: "Slow manual decisions increase RTO; unsafe automation can create unrecoverable divergence.",
       },
+      {
+        decision: "Where the promotion decision is made",
+        preferA: "Let an independent quorum outside both regions arbitrate promotion, so the decision survives losing either side.",
+        preferB: "Require a human confirmation when the blast radius of promoting wrongly exceeds the cost of the extra minutes it takes.",
+        watch: "A control plane hosted inside the primary region cannot arbitrate that region's failure, and it is the configuration most systems ship with by accident.",
+      },
     ],
     failureModes: [
       {
         mode: "Split-brain writers",
         symptom: "Two regions accept conflicting writes for the same ownership domain after a partition.",
-        mitigation: "Use quorum-issued epochs, enforce fencing at storage, and choose availability loss over invariant loss where necessary.",
+        mitigation: "Use quorum-issued fencing tokens, enforce token checks at storage, and choose availability loss over invariant loss where necessary.",
       },
       {
         mode: "Failover with hidden replication lag",
@@ -2301,6 +2759,11 @@ export const classicTopics: RawStudyTopic[] = [
         symptom: "Backups exist on paper but restore misses its RTO, violates invariants, or shares the corrupted credentials and region.",
         mitigation: "Use independent immutable copies, recurring full restores, checksum and domain validation, and measured disaster exercises.",
       },
+      {
+        mode: "Standby capacity drifted below production load",
+        symptom: "The promoted region serves traffic for a few minutes, then collapses under cold caches and a connection-pool ceiling nobody resized after two quarters of growth.",
+        mitigation: "Keep real traffic flowing through the standby continuously, even a small share, so capacity, cache warmth, and configuration drift surface on an ordinary Tuesday instead of during the failover.",
+      },
     ],
     interviewQuestions: [
       "Which writes can be accepted in two regions without conflict?",
@@ -2310,36 +2773,58 @@ export const classicTopics: RawStudyTopic[] = [
     decisionChecklist: [
       "Assign an owner and consistency policy to every mutable dataset.",
       "State read and write behavior during regional partition.",
-      "Fence writers with epochs before failover.",
+      "Fence writers with quorum-issued fencing tokens before failover.",
       "Measure replication lag against RPO and restore against RTO.",
       "Design backup independence, invariant validation, reconciliation, and failback.",
     ],
     exercise:
       "Take a payment ledger and a newsfeed through loss of their primary region. Define routing, replication, promotion evidence, fencing, RPO/RTO, degraded behavior, reconciliation, restore, and failback for each.",
-    prerequisites: ["replication-and-partitioning", "classic-slos-backpressure-degradation"],
+    prerequisites: ["replication-partitioning", "classic-slos-backpressure-degradation"],
     relatedDesigns: ["classic-payment-ledger", "classic-newsfeed", "classic-chat"],
     quiz: [
       {
-        prompt: "What is the main purpose of a fencing token during failover?",
+        prompt: "What does a fencing token accomplish during failover?",
         options: [
-          "Compress replicated data",
-          "Prevent an old writer from committing after a new writer is promoted",
-          "Reduce CDN latency",
-          "Choose a cache TTL",
+          "It orders writes inside one region",
+          "It proves the old primary is offline",
+          "It blocks writes from the old primary",
+          "It removes replication lag at cutover",
         ],
-        answerIndex: 1,
-        explanation: "A monotonically newer epoch lets storage reject stale-primary writes even if the old region later reconnects.",
+        answerIndex: 2,
+        explanation: "Storage rejects any mutation carrying a fencing token older than the current one, so a reconnecting old primary is harmless even while it still believes it leads. 'Proves the old primary is offline' is the split-brain misconception: fencing never establishes that the old writer stopped, only that its writes no longer count.",
       },
       {
-        prompt: "Why are replicas not sufficient as backups?",
+        prompt: "Why are cross-region replicas not a substitute for backups?",
         options: [
-          "Replicas cannot store bytes",
-          "They may replicate corruption or deletion and share failure domains",
-          "They always have infinite lag",
-          "They cannot serve reads",
+          "Replicas cannot store enough bytes",
+          "They copy corruption and deletions",
+          "They always run with infinite lag",
+          "They are unable to serve any reads",
         ],
         answerIndex: 1,
-        explanation: "Replication improves availability but can faithfully copy logical damage; independent versioned backups support point-in-time recovery.",
+        explanation: "Replication faithfully reproduces logical damage and usually shares credentials and an access domain, so only independent versioned copies allow point-in-time recovery. The lag option confuses an availability property with the corruption and accidental-deletion problem that backups exist to solve.",
+      },
+      {
+        prompt: "Replication runs 45 seconds behind at peak and the stated RPO is 10 seconds. What does promoting the standby now mean?",
+        options: [
+          "RPO is met; lag is under a minute",
+          "No loss; the log replays them later",
+          "RPO applies only to backup copies",
+          "Up to 45 seconds of writes are lost",
+        ],
+        answerIndex: 3,
+        explanation: "Measured lag is the real recovery point, so promotion discards as much as 45 seconds of acknowledged writes and misses a 10-second RPO by more than four times. 'The log replays them later' is the seductive belief that asynchronous replication is merely delayed; whatever never left the failed region is gone.",
+      },
+      {
+        prompt: "After a partition heals, two regions have accepted conflicting writes for the same keys. What was missing?",
+        options: [
+          "Token checks enforced at storage",
+          "A larger cross-region link budget",
+          "More frequent backup verification",
+          "Lower replication lag on the link",
+        ],
+        answerIndex: 0,
+        explanation: "Promotion must obtain a higher quorum-issued fencing token and storage must refuse mutations bearing older ones, or 'unreachable' silently becomes 'stopped.' Blaming replication lag is the tempting neighbor: lag decides how much data is lost, not whether two writers are allowed to commit at once.",
       },
     ],
     recallCards: [
@@ -2356,7 +2841,7 @@ export const classicTopics: RawStudyTopic[] = [
     eyebrow: "Atomicity across owners",
     estimatedMinutes: 85,
     summary: "Compare atomic commitment with compensation-based workflows, explain why two-phase commit blocks, and choose a protocol from failure behavior rather than from familiarity.",
-    whyItMatters: "“Just use a distributed transaction” and “just use a saga” are both non-answers. Interviewers probe whether you know what 2PC actually guarantees, why it stalls, and what atomicity you surrender when you replace it with compensation.",
+    whyItMatters: "Two-phase commit does not fail by returning an error; it fails by not returning at all. A participant that has prepared has already surrendered its right to abort, so when the coordinator dies between phases those rows stay locked until it comes back — perfectly safe and completely unavailable. A saga buys that liveness back by giving up isolation instead, which means somebody can read the half-finished order, and TCC buys a workable approximation of isolation back again by converting the irreversible step into a hold that expires.",
     objectives: ["State what 2PC guarantees and the precise condition under which it blocks", "Design saga workflows with compensations and semantic rollback", "Apply TCC reservations where compensation is unacceptable", "Choose isolation and visibility semantics for multi-step business operations"],
     concepts: ["atomic commitment", "two-phase commit", "coordinator log", "in-doubt transaction", "saga", "compensation", "TCC", "semantic lock", "isolation anomaly"],
     deepDive: [
@@ -2384,6 +2869,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "TCC splits an operation into a try that reserves capacity, and a confirm or cancel that finalizes it. Reserved inventory or a payment authorization is invisible to other callers, which restores a usable approximation of isolation.",
           "Reservations require expiry: a hold whose confirm never arrives must time out, or capacity leaks. The expiry must be longer than the maximum workflow duration and shorter than the business tolerance for locked capacity.",
+          "Pin the number between the two bounds you can actually measure. If the workflow's p99 is 20 minutes and the business tolerates held inventory for 2 hours, a 45-minute hold cancels nothing still running and leaks nothing longer than an afternoon; 10 minutes would cancel live workflows and no expiry at all leaks a unit of stock every time a confirm is lost.",
           "Where a semantic lock is impossible, apply commutative operations instead—an append-only ledger entry or a counter increment can be applied in any order and reversed by a compensating entry without a lock.",
         ],
       },
@@ -2401,11 +2887,13 @@ export const classicTopics: RawStudyTopic[] = [
     interviewQuestions: ["What exactly happens if the coordinator dies after prepare?", "Which steps here are truly reversible?", "What can another user observe halfway through this workflow?", "How long may a reservation be held before it expires?"],
     decisionChecklist: ["State whether participants can prepare at all", "Identify irreversible steps before choosing compensation", "Define expiry for every reservation", "Make compensations idempotent and retried", "Say what intermediate state is visible"],
     exercise: "Design order placement spanning payment authorization, inventory reservation, and shipping, then walk through failure at each step and state precisely what the customer sees.",
-    prerequisites: ["Consistency, transactions & idempotency", "Idempotent workflows, outbox & sagas"],
-    relatedDesigns: ["Payment and Ledger System", "Notification System", "File Storage and Synchronization"],
+    prerequisites: ["consistency-idempotency", "replication-partitioning"],
+    relatedDesigns: ["classic-payment-ledger", "classic-notifications", "classic-file-sync"],
     quiz: [
-      { prompt: "Why is two-phase commit called a blocking protocol?", options: ["It uses blocking I/O", "Prepared participants cannot unilaterally decide if the coordinator fails", "It cannot be replicated", "It requires synchronized clocks"], answerIndex: 1, explanation: "After promising in prepare, a participant has surrendered unilateral abort. If the decision never arrives it stays in doubt, holding locks until the coordinator recovers." },
-      { prompt: "What does a saga fundamentally give up compared with a distributed transaction?", options: ["Durability", "Isolation of intermediate states", "The ability to retry", "Idempotency"], answerIndex: 1, explanation: "Each saga step commits and becomes visible immediately, so other transactions can observe partial progress that may later be compensated." },
+      { prompt: "Why is two-phase commit called a blocking protocol?", options: ["It relies on blocking socket calls", "It needs tightly synchronized clocks", "Its coordinator cannot be replicated", "Prepared participants cannot decide"], answerIndex: 3, explanation: "Once a participant promises in prepare it has surrendered unilateral abort, so a lost decision leaves it in doubt holding locks until the coordinator recovers. 'Blocking I/O' is the name-driven misreading: the blocking here is a liveness property of the protocol, not a threading model." },
+      { prompt: "What does a saga fundamentally give up compared with a distributed transaction?", options: ["Durability of committed steps", "The ability to retry a step", "Isolation of intermediate state", "Idempotency of its operations"], answerIndex: 2, explanation: "Every step commits and becomes visible immediately, so other transactions can read partial progress that a later compensation reverses. Choosing durability is the common inversion: saga steps are fully durable, and that is precisely why they cannot be rolled back and must be compensated instead." },
+      { prompt: "A workflow can run for 20 minutes and the business tolerates held inventory for 2 hours. Which reservation expiry is valid?", options: ["45 minutes, inside both bounds", "10 minutes, half the workflow", "6 hours, well past tolerance", "No expiry; confirm will arrive"], answerIndex: 0, explanation: "Expiry must exceed the maximum workflow duration and stay under the business tolerance, so any value between 20 minutes and 2 hours works. Ten minutes is the tempting 'tight' choice and cancels holds out from under workflows still running, while no expiry leaks capacity forever every time a confirm is lost." },
+      { prompt: "A reader acts on an order state that is compensated moments later. What was missing?", options: ["A replicated coordinator log", "An explicit pending lifecycle", "Idempotent compensation steps", "A shorter reservation expiry"], answerIndex: 1, explanation: "Sagas have no global isolation, so intermediate state must sit behind a semantic lock, a reservation status, or an explicit lifecycle field that readers respect. Reaching for a replicated coordinator log is the 2PC reflex and fixes a coordinator-liveness problem this workflow never had." },
     ],
     recallCards: [
       { id: "dtx-2pc-block", prompt: "Walk through both phases of 2PC and explain exactly when and why a participant becomes stuck in doubt.", answer: "In prepare, the coordinator asks each participant to durably promise it can commit; the participant writes a prepared record and gives up the right to abort on its own. In commit, the coordinator durably records the decision and broadcasts it. If the coordinator crashes after participants prepare but before the decision reaches them, those participants may neither commit nor abort — they are in doubt and hold their locks until the coordinator recovers. 2PC is therefore safe but not live; replicating the coordinator's decision log with consensus is the usual production mitigation." },
@@ -2422,8 +2910,8 @@ export const classicTopics: RawStudyTopic[] = [
     eyebrow: "Who is alive, and where",
     estimatedMinutes: 75,
     summary: "Propagate cluster membership with gossip, detect failure without declaring healthy nodes dead, and let callers find live instances through discovery, health checking, and leader election.",
-    whyItMatters: "Every architecture diagram assumes services can find each other and notice when a peer dies. Interviewers push on this the moment you add a second instance, and “the load balancer handles it” stops being an answer once the system owns its own membership.",
-    objectives: ["Explain gossip dissemination and its convergence properties", "Distinguish failure detection from failure, and tune the trade-off", "Design service discovery with health checking and staleness bounds", "Use leader election safely with leases and fencing"],
+    whyItMatters: "The gap between a process dying and traffic stopping is a sum, and it runs longer than anyone estimates: three missed 2-second heartbeats to suspect, then up to a 10-second registry TTL before the entry disappears, is sixteen seconds of requests dropped into a black hole. Shortening either number trades that outage for false positives, which are the worse failure — a healthy-but-slow node evicted during a latency blip takes its shard's traffic down with it.",
+    objectives: ["Explain gossip dissemination and its convergence properties", "Distinguish failure detection from failure, and tune the trade-off", "Design service discovery with health checking and staleness bounds", "Use leader election safely with leases and fencing tokens"],
     concepts: ["gossip protocol", "SWIM", "phi accrual detector", "heartbeat", "service registry", "client-side discovery", "health check", "leader election", "split brain", "quorum"],
     deepDive: [
       {
@@ -2441,6 +2929,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Fixed-timeout heartbeating forces a hard choice: a short timeout declares healthy-but-slow nodes dead and triggers needless failovers, while a long timeout leaves real failures undetected and traffic flowing into a black hole.",
           "A phi accrual detector instead outputs a continuous suspicion level derived from the observed distribution of heartbeat inter-arrival times, letting different subsystems apply different thresholds and adapting automatically to a network that is simply slower than assumed.",
+          "Write the removal delay down as a sum rather than quoting the detection half: 3 missed heartbeats at 2 seconds is 6 seconds to suspect, plus a 10-second registry TTL before the entry expires, is up to 16 seconds of traffic still routed to a dead instance. Reporting only the 6 understates the user-visible outage by nearly two thirds.",
           "Detection errors are correlated: a network partition makes each side declare the other dead simultaneously. Any action taken on suspicion must therefore be safe when both sides act at once, which is what forces quorum for anything exclusive.",
         ],
       },
@@ -2450,7 +2939,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "Server-side discovery puts a load balancer in the path, keeping clients simple at the cost of an extra hop; client-side discovery lets clients query a registry and choose an instance directly, removing the hop but pushing selection, caching, and staleness handling into every client and language.",
           "A liveness check answers whether the process is running; a readiness check answers whether it should receive traffic right now, which differs during warm-up, cache fill, or dependency loss. Conflating them causes cold instances to receive traffic and, worse, deep dependency checks to fail every instance at once when one shared dependency degrades.",
-          "Election makes one node the owner, but the winner's belief is not self-enforcing: a paused leader can resume convinced it still holds office. Grant leadership as an expiring lease carrying a monotonically increasing epoch, and have the protected resource reject any write with a stale epoch, so split brain becomes a rejected write rather than corruption.",
+          "Election makes one node the owner, but the winner's belief is not self-enforcing: a paused leader can resume convinced it still holds office. Grant leadership as an expiring lease carrying a monotonically increasing fencing token (also called a fencing epoch), and have the protected resource reject any write with a stale token, so split brain becomes a rejected write rather than corruption.",
         ],
       },
     ],
@@ -2461,23 +2950,25 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     failureModes: [
       { mode: "Deep dependency check inside a readiness probe", symptom: "One slow shared dependency marks every instance unready and removes the whole fleet from rotation", mitigation: "Keep readiness local and shallow; report dependency health separately and degrade rather than deregister." },
-      { mode: "Partition causes both sides to elect a leader", symptom: "Two owners accept conflicting writes", mitigation: "Require a quorum to hold leadership and fence the resource with a monotonic epoch." },
+      { mode: "Partition causes both sides to elect a leader", symptom: "Two owners accept conflicting writes", mitigation: "Require a quorum to hold leadership and fence the resource with a monotonic fencing token." },
       { mode: "Stale registry entry keeps receiving traffic", symptom: "Requests routed to a terminated instance until the TTL expires", mitigation: "Deregister on graceful shutdown, expire entries by TTL, and let clients eject endpoints on connection failure." },
     ],
     interviewQuestions: ["How does a caller learn an instance died?", "What is the delay between failure and traffic stopping?", "What happens to leadership during a partition?", "What does your health check actually verify?"],
-    decisionChecklist: ["State how membership propagates and its staleness", "Separate liveness from readiness", "Bound the detection-to-removal delay", "Require quorum for exclusive ownership", "Fence protected resources with an epoch"],
+    decisionChecklist: ["State how membership propagates and its staleness", "Separate liveness from readiness", "Bound the detection-to-removal delay", "Require quorum for exclusive ownership", "Fence protected resources with a monotonic fencing token"],
     exercise: "Design membership and discovery for a stateful sharded cache: describe how a node death is detected, how ownership moves, what clients do with a stale map, and what prevents two nodes serving the same shard.",
-    prerequisites: ["Replication, consensus & partitioning", "Networking & service boundaries"],
-    relatedDesigns: ["Distributed cache", "Chat and Messaging", "Metrics, Logging, and Observability Platform"],
+    prerequisites: ["replication-partitioning", "networking"],
+    relatedDesigns: ["classic-chat", "classic-observability-platform"],
     quiz: [
-      { prompt: "Why does SWIM ask other members to probe a peer before suspecting it?", options: ["To reduce memory use", "To distinguish a dead peer from one unreachable over a single congested path", "To elect a leader", "To compress gossip messages"], answerIndex: 1, explanation: "Indirect probing through k other members separates a genuinely failed node from a local network problem between one pair, cutting false positives sharply." },
-      { prompt: "What makes leader election safe when a leader pauses and resumes?", options: ["A longer heartbeat interval", "A monotonic fencing epoch the resource validates", "Synchronized clocks", "Retrying the election"], answerIndex: 1, explanation: "A resumed leader still believes it holds office. The protected resource must reject writes carrying an older epoch than the one it has already seen." },
+      { prompt: "Why does SWIM ask other members to probe a peer before suspecting it?", options: ["To separate a dead peer from a bad path", "To reduce membership metadata memory", "To elect a leader without a quorum", "To compress every gossip message payload"], answerIndex: 0, explanation: "Indirect probes through k other members distinguish a genuinely failed node from congestion on one pair of links, which is where nearly all false positives originate. The memory answer confuses SWIM's dissemination efficiency with its detection accuracy; the extra probes cost messages, not memory." },
+      { prompt: "What makes leader election safe when a leader pauses and later resumes?", options: ["A substantially longer heartbeat", "Clocks kept synchronized by NTP", "Immediately retrying the election", "A fencing token the resource checks"], answerIndex: 3, explanation: "A resumed leader still believes it holds office, so safety has to live at the protected resource, which records the highest fencing token it has seen and rejects anything older. Lengthening the heartbeat is the tempting tuning knob and merely widens the window in which the stale leader is still trusted." },
+      { prompt: "Heartbeats run every 2 s, a node is declared dead after 3 misses, and the registry TTL is 10 s. How long can traffic keep flowing to a dead instance?", options: ["Up to 6 seconds, detection only", "Up to 16 seconds, detection plus TTL", "Up to 10 seconds, the TTL alone", "None; the first missed beat stops it"], answerIndex: 1, explanation: "The delays compose: three missed beats at two seconds is six seconds to suspect, then up to ten more before the registry entry expires, so roughly sixteen seconds of traffic into a black hole. Quoting detection alone is the usual omission and understates the user-visible outage by the entire TTL." },
+      { prompt: "One slow shared database makes every instance report unready and the whole fleet leaves rotation. What is the fix?", options: ["Shorten the failure detection timeout", "Elect a leader to gate the checks", "Keep readiness local and shallow", "Raise the registry TTL for entries"], answerIndex: 2, explanation: "Readiness answers whether this instance can serve traffic right now, so putting a shared dependency inside it converts one degradation into a fleet-wide outage; dependency health belongs on a separate signal that degrades rather than deregisters. Raising the TTL is the tempting patch and only postpones the same mass removal." },
     ],
     recallCards: [
       { id: "mem-gossip", prompt: "Explain how gossip disseminates membership and why its per-node cost scales where heartbeating everyone does not.",
         answer: "Each node periodically picks a small random subset of peers and exchanges membership state, so an update reaches the whole cluster in roughly logarithmic rounds while each node sends a constant number of messages per round regardless of cluster size. All-to-all heartbeating instead makes per-node message cost grow linearly with the cluster, which is what breaks at scale. The price is that gossip converges only eventually, so two nodes can briefly hold different views - which is why membership must never be the sole authority for anything requiring exclusivity." },
       { id: "mem-fencing", prompt: "Explain why winning an election is not enough for safe exclusive ownership, and what makes it safe.",
-        answer: "A leader can be paused by a long garbage-collection pause, descheduling, or a partition, lose its lease, and then resume still believing it is the owner - meanwhile a new leader has been elected, so two processes think they own the resource. Safety cannot come from the leader's own belief. Leadership is granted as an expiring lease carrying a monotonically increasing epoch, and the protected resource records the highest epoch it has seen and rejects any write with an older one. Split brain then degrades into a rejected write instead of silent corruption." },
+        answer: "A leader can be paused by a long garbage-collection pause, descheduling, or a partition, lose its lease, and then resume still believing it is the owner - meanwhile a new leader has been elected, so two processes think they own the resource. Safety cannot come from the leader's own belief. Leadership is granted as an expiring lease carrying a monotonically increasing fencing token, and the protected resource records the highest token it has seen and rejects any write with an older one. Split brain then degrades into a rejected write instead of silent corruption." },
     ],
     furtherReading: [{ label: "Das et al. — SWIM", url: "https://www.cs.cornell.edu/projects/Protocols/SWIM/SWIM.pdf" }],
   },
@@ -2490,7 +2981,7 @@ export const classicTopics: RawStudyTopic[] = [
     eyebrow: "Merge without losing writes",
     estimatedMinutes: 80,
     summary: "Track causality with logical clocks, detect concurrent updates instead of silently discarding them, and choose between conflict surfacing, operational transform, and convergent replicated data types.",
-    whyItMatters: "Any design with offline clients, multi-leader replication, or collaborative editing will be pushed on conflicts. Answering “last write wins” without naming what that loses is the single most common way to fail a file-sync or collaboration question.",
+    whyItMatters: "Last-write-wins is not a merge strategy; it is a decision to delete one of two writes and keep no record that it existed, and on a replica whose clock has drifted 200 milliseconds ahead, the write it deletes is the newer one. Everything in this module exists to make that outcome a choice rather than an accident: detect concurrency first with a version vector, then pick a resolution the product can defend — surface it, union it, or discard it deliberately.",
     objectives: ["Explain why wall-clock timestamps cannot order distributed events", "Use Lamport clocks and version vectors to detect concurrency", "Choose a conflict strategy from product semantics", "Describe CRDT convergence and its real costs"],
     concepts: ["happens-before", "Lamport clock", "vector clock", "version vector", "concurrent update", "last-write-wins", "CRDT", "operational transform", "tombstone"],
     deepDive: [
@@ -2500,7 +2991,7 @@ export const classicTopics: RawStudyTopic[] = [
         points: [
           "The happens-before relation is a partial order: two events are concurrent when neither causally precedes the other. Wall-clock comparison forces a total order and therefore invents an ordering between genuinely concurrent events.",
           "A Lamport clock is a single counter that guarantees if A happens-before B then L(A) < L(B), but the converse does not hold—so it can order events but cannot detect concurrency. A vector clock keeps one counter per node, and comparing vectors distinguishes “before”, “after”, and “concurrent”.",
-          "A version vector is the replica-per-key form used in storage systems. Its cost is real: size grows with the number of writers, so systems prune entries, cap writers, or attach client IDs rather than server IDs to bound growth.",
+          "A version vector is the replica-per-key form used in storage systems. Its cost is real and countable: with 50,000 active clients, keying by client puts 50,000 entries on a single key, while keying by the 12 replicas that actually store it bounds the vector at 12. Production systems therefore key entries by replica rather than by client—bounding the vector by cluster size instead of by an unbounded client population—and truncate least-recently-updated entries when it still grows. Riak's move from client-id to vnode-id vector clocks is the canonical example of getting this the wrong way round first.",
         ],
       },
       {
@@ -2517,7 +3008,7 @@ export const classicTopics: RawStudyTopic[] = [
         summary: "Convergent types make merge automatic by constraining what operations are allowed.",
         points: [
           "State-based (CvRDT) types merge by a join over a lattice; operation-based (CmRDT) types broadcast commutative operations and require exactly-once causal delivery. Both converge without coordination, which is why they suit offline and multi-leader systems.",
-          "Deletion is the hard part. A removed element usually leaves a tombstone so a concurrent re-add or a late replica cannot resurrect it, and tombstones must be garbage-collected only once every replica has observed the removal.",
+          "Deletion is the hard part. A removed element usually leaves a tombstone so a replica that has not yet seen the removal cannot resurrect the element when states merge, and tombstones must be garbage-collected only once every replica has observed the removal. Note the add-wins default: in an observed-remove set a removal cancels only the add-tags it has already observed, so a genuinely concurrent re-add carries a new tag and survives on purpose.",
           "CRDTs guarantee convergence, not correctness of intent: two replicas will agree, but the agreed result may not be what either user meant. Text editing needs sequence CRDTs or operational transform, both of which carry substantial metadata and implementation complexity.",
         ],
       },
@@ -2529,20 +3020,22 @@ export const classicTopics: RawStudyTopic[] = [
     ],
     failureModes: [
       { mode: "Clock skew reorders writes under LWW", symptom: "A newer update silently disappears after a replica's clock drifts", mitigation: "Use logical clocks for ordering; reserve physical time for observability, not correctness." },
-      { mode: "Vector clocks grow unbounded", symptom: "Per-key metadata dominates payload size in a large fleet", mitigation: "Key vectors by client rather than server, cap entries, and prune with a durable low-water mark." },
+      { mode: "Vector clocks grow unbounded", symptom: "Per-key metadata dominates payload size in a large fleet", mitigation: "Key vectors by replica rather than by client so the actor set is bounded by the cluster, cap entries, and truncate the oldest under a durable low-water mark." },
       { mode: "Deleted item is resurrected", symptom: "An element reappears after a partitioned replica reconnects", mitigation: "Retain tombstones until every replica has acknowledged, then collect them under a causal stability threshold." },
     ],
     interviewQuestions: ["How do you tell a concurrent write from a stale one?", "What information does last-write-wins destroy here?", "Who resolves a conflict—the system or the user?", "When can a tombstone safely be deleted?"],
     decisionChecklist: ["Detect concurrency before resolving it", "Justify LWW by showing the field is disposable", "Make any merge commutative, associative, and idempotent", "Bound version-vector growth", "State the tombstone collection rule"],
     exercise: "Design conflict handling for a note-taking app that syncs offline edits from three devices, specifying detection, merge behavior per field, and what the user sees when intent genuinely diverges.",
-    prerequisites: ["Replication, consensus & partitioning", "Consistency, transactions & idempotency"],
-    relatedDesigns: ["File Storage and Synchronization", "Chat and Messaging", "Newsfeed or Timeline"],
+    prerequisites: ["replication-partitioning", "consistency-idempotency"],
+    relatedDesigns: ["classic-file-sync", "classic-chat", "classic-newsfeed"],
     quiz: [
-      { prompt: "What can a version vector do that a Lamport clock cannot?", options: ["Order causally related events", "Detect that two updates were concurrent", "Compress metadata", "Guarantee delivery"], answerIndex: 1, explanation: "A Lamport clock only guarantees causally ordered events get increasing counters. Comparing per-node vectors distinguishes concurrent updates from ordered ones." },
-      { prompt: "Why do CRDTs generally need tombstones for deletion?", options: ["To compress state", "So a concurrent or late re-add cannot resurrect the removed element", "To satisfy the type system", "To order writes by wall clock"], answerIndex: 1, explanation: "Without a durable record of the removal, a replica that never saw the delete will re-introduce the element when states merge." },
+      { prompt: "What can a version vector do that a Lamport clock cannot?", options: ["Order causally related events", "Compress replica metadata", "Detect two concurrent updates", "Guarantee message delivery"], answerIndex: 2, explanation: "A Lamport clock only guarantees that causally ordered events get increasing counters, so it can order events but never tell you two were concurrent; comparing per-replica vectors yields before, after, or concurrent. 'Order causally related events' is the trap, because that is the one capability both mechanisms already share." },
+      { prompt: "Why do CRDTs generally need tombstones for deletion?", options: ["So a replica that never saw the delete cannot resurrect the element", "So concurrent deletions can be ordered against each other by clock", "So the merge function can compress all replica state into one value", "So a genuinely concurrent re-add is discarded rather than retained"], answerIndex: 0, explanation: "Without a durable record of the removal, a replica that never observed the delete reintroduces the element the moment states merge. The last option inverts the add-wins default: in an observed-remove set a removal cancels only the add-tags it has already observed, so a genuinely concurrent re-add carries a new tag and survives on purpose." },
+      { prompt: "A version vector keyed by client with 50,000 active clients, versus keyed by replica in a 12-node cluster. How large is each?", options: ["Twelve entries under both keyings", "One entry per key in either scheme", "50,000 entries under both schemes", "50,000 entries versus 12 entries"], answerIndex: 3, explanation: "Keying by client grows the vector with an unbounded client population, while keying by replica bounds it at cluster size, so the same key carries 50,000 entries in one scheme and 12 in the other. Assuming both cost the same is the mistake Riak had to undo when it moved from client-id to vnode-id vector clocks." },
+      { prompt: "A newer update vanishes after one replica's clock drifts ahead. What is the root cause?", options: ["Tombstones were collected early", "LWW ordered writes by wall clock", "The merge was not idempotent", "Version vectors were truncated"], answerIndex: 1, explanation: "Physical time is not evidence of causal order, so a skewed clock makes a stale write look newest and it overwrites the good one with no audit trail; logical clocks belong in the ordering path and wall time in observability. Truncated version vectors are the tempting neighbor, but truncation causes false conflicts rather than silent loss." },
     ],
     recallCards: [
-      { id: "crdt-detect", prompt: "Explain why wall-clock timestamps cannot correctly order distributed writes, and what a version vector adds.", answer: "Happens-before is a partial order, so genuinely concurrent events have no true ordering between them. Comparing wall-clock timestamps forces a total order, inventing an ordering that clock skew can get backwards — a stale write can then overwrite a newer one with no record that anything was lost. A version vector keeps a counter per writer; comparing two vectors yields before, after, or concurrent, so the system can detect a real conflict and apply a deliberate resolution policy instead of silently discarding a write. Its cost is metadata that grows with the number of writers, requiring pruning or client-keyed entries." },
+      { id: "crdt-detect", prompt: "Explain why wall-clock timestamps cannot correctly order distributed writes, and what a version vector adds.", answer: "Happens-before is a partial order, so genuinely concurrent events have no true ordering between them. Comparing wall-clock timestamps forces a total order, inventing an ordering that clock skew can get backwards — a stale write can then overwrite a newer one with no record that anything was lost. A version vector keeps a counter per writer; comparing two vectors yields before, after, or concurrent, so the system can detect a real conflict and apply a deliberate resolution policy instead of silently discarding a write. Its cost is metadata that grows with the number of actors, which is why production systems key entries by replica rather than by client — bounding the vector by cluster size rather than by an unbounded client population — and truncate the oldest entries under a durable low-water mark." },
       { id: "crdt-converge", prompt: "State the properties a merge function must have for replicas to converge, and what CRDT convergence does not promise.", answer: "The merge must be commutative, associative, and idempotent, so replicas reach the same state regardless of the order or number of times updates are delivered — which is what allows convergence without coordination. It does not promise that the converged value reflects either user's intent: two replicas will agree, but the agreed result can be semantically wrong, which is why collaborative text needs sequence CRDTs or operational transform rather than a naive set merge." },
     ],
     furtherReading: [{ label: "Shapiro et al. — A comprehensive study of CRDTs", url: "https://inria.hal.science/inria-00555588/document" }],
@@ -2586,24 +3079,24 @@ export const classicPrompts: DesignPrompt[] = [
     ],
     reference: {
       diagram: {
-        caption: "IDs are minted from a pre-leased range held in memory, so the common path never touches the coordinator; only range exhaustion does.",
+        caption: "IDs are minted locally from a leased worker identity plus the local clock and a per-tick sequence, so the hot path never touches the coordinator; only lease acquisition and renewal do.",
         nodes: [
           { id: "client", label: "Client service", kind: "client", col: 0, row: 1 },
           { id: "gen", label: "ID generator node", kind: "service", col: 1, row: 1 },
-          { id: "mem", label: "In-memory range", kind: "cache", col: 2, row: 0 },
-          { id: "lease", label: "Range lease coordinator", kind: "service", col: 2, row: 2 },
+          { id: "mem", label: "In-memory worker lease", kind: "cache", col: 2, row: 0 },
+          { id: "lease", label: "Worker lease coordinator", kind: "service", col: 2, row: 2 },
           { id: "store", label: "Lease store (CAS)", kind: "store", col: 3, row: 2 },
           { id: "clock", label: "Node/epoch registry", kind: "store", col: 3, row: 0 },
           { id: "consumer", label: "Consuming writes", kind: "service", col: 1, row: 3 },
         ],
         edges: [
           { from: "client", to: "gen", label: "nextId()" },
-          { from: "gen", to: "mem", label: "take" },
-          { from: "mem", to: "lease", label: "exhausted" },
+          { from: "gen", to: "mem", label: "read lease" },
+          { from: "mem", to: "lease", label: "renew / expiring" },
           { from: "lease", to: "store", label: "CAS" },
           { from: "gen", to: "clock", label: "node+epoch" },
           { from: "gen", to: "consumer", label: "monotonic id" },
-          { from: "lease", to: "mem", label: "new range", async: true },
+          { from: "lease", to: "mem", label: "worker id + incarnation", async: true },
         ],
       },
       scope: [
@@ -2812,7 +3305,7 @@ export const classicPrompts: DesignPrompt[] = [
       "Design a one-to-one and group chat system with persistent connections, offline delivery, per-conversation ordering, delivery and read receipts, presence, and multi-device synchronization.",
     requirementsToExplore: [
       "Concurrent connections, messages per second, group sizes, message retention, and attachment scope",
-      "Ordering, durable acknowledgement, delivery, and read semantics",
+      "Ordering, durable acknowledgment, delivery, and read semantics",
       "Offline duration, history pagination, and multi-device cursor behavior",
       "Presence freshness, privacy, membership changes, and large groups",
       "Slow clients, reconnect storms, regional partitions, and degradation",
@@ -2889,7 +3382,7 @@ export const classicPrompts: DesignPrompt[] = [
       ],
       invariants: [
         "Only current members may send or read; delivery is not proof of continuing authorization.",
-        "A durable accepted acknowledgement is sent only after message storage commits.",
+        "A durable accepted acknowledgment is sent only after message storage commits.",
         "A repeated client message ID returns the original message ID and sequence without a second effect.",
         "Sequence order is monotonic per conversation, and device or receipt cursors never regress.",
         "Presence is explicitly ephemeral and cannot determine whether durable history exists.",
@@ -2908,7 +3401,7 @@ export const classicPrompts: DesignPrompt[] = [
           title: "Connections and fan-out",
           summary: "Gateways hold sockets, but durable state and recovery live behind them.",
           points: [
-            "Estimate sockets, heartbeat QPS, memory, descriptors, and reconnection headroom independently from message QPS.",
+            "Size the tier from concurrent sockets rather than message rate: descriptors, per-socket memory, and heartbeat writes all scale with connections that are sitting idle, and the reconnect burst after a zone loss is what sets the headroom.",
             "Use leased routing hints and cursor recovery when gateways fail or routes are stale.",
             "For large groups, persist one message and batch member pointers or notifications with quota isolation.",
           ],
@@ -3036,7 +3529,7 @@ export const classicPrompts: DesignPrompt[] = [
           summary: "The ledger records internal financial truth while reconciliation compares it with external settlement facts.",
           points: [
             "Post all entries for one business event in one balanced transaction and derive or transactionally maintain balances.",
-            "Match settlement by stable identifiers and classify missing, duplicate, amount, currency, and state mismatches.",
+            "Match settlement rows to internal payments on the provider request ID, then report each mismatch under its own class — present here but not there, present twice, right amount in the wrong currency — because a single aggregate error count tells an operator nothing about what to do next.",
             "Correct through new postings and state transitions with audit links, never destructive edits.",
           ],
         },
@@ -3278,7 +3771,7 @@ export const classicPrompts: DesignPrompt[] = [
           title: "Chunk, verify, and commit",
           summary: "Byte transfer is asynchronous; one metadata transaction is the visibility boundary.",
           points: [
-            "Choose chunk size from resume granularity, object requests, manifest size, and delta reuse.",
+            "Choose the chunk size by naming what it trades: a smaller chunk resumes nearer to where the transfer broke and reuses more unchanged bytes between versions, and pays for both in object requests and manifest rows.",
             "Verify hashes on trusted infrastructure and scope dedupe to a tenant or encryption domain.",
             "Create the manifest only after all chunks are durable; collect abandoned session bytes after expiry and a safety window.",
           ],
@@ -3568,7 +4061,7 @@ export const classicPrompts: DesignPrompt[] = [
     prompt:
       "Design a multi-tenant platform that ingests metrics and structured logs, supports range and aggregate queries, dashboards and alerts, controls cardinality and query cost, and applies tiered retention without failing during incidents.",
     requirementsToExplore: [
-      "Tenants, ingestion volume, metric series, log bytes, burst factor, and acknowledgement durability",
+      "Tenants, ingestion volume, metric series, log bytes, burst factor, and acknowledgment durability",
       "Out-of-order and duplicate data, indexing, query shapes, latency, and partial-result policy",
       "Cardinality limits, tenant fairness, dashboards, alerts, and notification dependencies",
       "Raw retention, aggregation, downsampling, cold storage, deletion, and cost attribution",
@@ -3637,7 +4130,7 @@ export const classicPrompts: DesignPrompt[] = [
         "AlertRule, EvaluationCheckpoint, AlertInstance state, and NotificationOutbox preserve evaluator retry and delivery state.",
       ],
       architecture: [
-        "Agents batch and compress locally; regional collectors authenticate, validate, quota, and spool before durable-stream acknowledgement.",
+        "Agents batch and compress locally; regional collectors authenticate, validate, quota, and spool before durable-stream acknowledgment.",
         "Stream partitions feed metric and log consumers that normalize, aggregate, index, and write immutable time-partitioned storage.",
         "Recent indexed data stays on fast storage; compacted raw segments and rollups move to object-backed tiers by retention policy.",
         "Query frontend authenticates, plans time and label pruning, enforces cost, fans out to shards, merges, caches, and labels partial results.",
@@ -3664,7 +4157,7 @@ export const classicPrompts: DesignPrompt[] = [
           title: "Query and alert execution",
           summary: "Time and label pruning bound work; checkpoints make repeated evaluation deterministic.",
           points: [
-            "Estimate query cost before fan-out and cap time range, series count, concurrency, and returned bytes.",
+            "Estimate a query's cost before fanning out, and reject the plan when its time range, series count, or projected returned bytes exceed the tenant's budget, rather than cancelling it midway after the shards have already paid for the scan.",
             "Return explicit partial metadata when a shard misses deadline instead of silently undercounting.",
             "Atomically commit the evaluation watermark, alert state, and deterministic notification-outbox row; relay at least once and deduplicate at the notification boundary.",
           ],
@@ -3673,7 +4166,7 @@ export const classicPrompts: DesignPrompt[] = [
       scaling: [
         "Batch and compress ingestion, shard by tenant and series hash, and scale consumers from oldest-stream age.",
         "Isolate high-volume tenants, enforce active-series budgets, and aggregate before storage where semantics permit.",
-        "Downsample and tier cold data, reserve compaction bandwidth, and apply query concurrency and cost guardrails.",
+        "Downsample and tier cold data, reserve compaction bandwidth, and apply query concurrency and cost limits.",
         "Deploy collectors regionally but keep cross-region query and disaster paths aware of lag and partial data.",
       ],
       observability: [

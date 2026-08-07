@@ -16,9 +16,16 @@ export type WeekPlan = {
   tier: CurriculumTier;
   focus: string;
   topics: string[];
+  /** Design prompts on the critical path. Titles must resolve to a prompt. */
   designs: string[];
+  /** Reachable-but-optional prompts, so nothing in the library is orphaned. */
+  extraDesigns: string[];
+  /** Derived from the week's module minutes plus its core designs, never hand-written. */
   hours: string;
 };
+
+/** A week before its hours are computed. */
+type WeekPlanSeed = Omit<WeekPlan, "hours">;
 
 export type EstimationDrill = {
   id: string;
@@ -34,16 +41,33 @@ export type EstimationDrill = {
 export type InterviewPhase = {
   id: string;
   label: string;
-  minutes: string;
+  /**
+   * Fraction of the interview this phase should occupy. Stored as a share
+   * rather than a minute range because design prompts run anywhere from 40 to
+   * 60 minutes; a hardcoded range would contradict the countdown on the same
+   * screen. Shares sum to 1.
+   */
+  share: number;
   description: string;
 };
+
+/** The clock the dashboard's reusable structure is quoted against. */
+export const BASELINE_INTERVIEW_MINUTES = 45;
+
+/** A phase's budget against one prompt's actual duration. */
+export function phaseMinutes(share: number, totalMinutes: number): string {
+  const target = share * totalMinutes;
+  const low = Math.max(1, Math.round(target * 0.85));
+  const high = Math.round(target * 1.15);
+  return low === high ? `≈${low}` : `${low}–${high}`;
+}
 
 export type StandardQuestion = {
   id: number;
   text: string;
 };
 
-export const curriculumWeeks: WeekPlan[] = [
+const weekPlanSeeds: WeekPlanSeed[] = [
   {
     week: 1,
     title: "Scale, guarantees & replication",
@@ -51,16 +75,16 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Build fast intuition for capacity, consistency guarantees per operation, replication ownership, and the request path.",
     topics: ["Latency and capacity", "Consistency", "Idempotency", "Replication", "Consensus", "Networking"],
     designs: ["URL shortener"],
-    hours: "5–6 h",
+    extraDesigns: [],
   },
   {
     week: 2,
     title: "Storage, caching & identity",
     tier: 0,
     focus: "Choose storage engines and caches from access patterns, then establish who the caller is and what they may do.",
-    topics: ["Caching", "Queues and logs", "Storage engines", "Indexing", "Authentication", "Authorization"],
+    topics: ["Caching", "Queues and logs", "Storage engines", "Indexing", "Authentication", "Authorization", "Timed practice"],
     designs: ["Distributed rate limiter"],
-    hours: "5–6 h",
+    extraDesigns: [],
   },
   {
     week: 3,
@@ -69,7 +93,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Survive partial failure: atomic commitment, compensation, causality, conflict resolution, membership, and reconciliation.",
     topics: ["2PC and sagas", "Vector clocks", "CRDTs", "Outbox", "Gossip and discovery", "Reconciliation"],
     designs: ["Unique ID Service"],
-    hours: "6–7 h",
+    extraDesigns: [],
   },
   {
     week: 4,
@@ -78,7 +102,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Reason about fan-out, ranking, pagination, persistent connections, and per-entity ordering.",
     topics: ["Fan-out", "Ranking", "Pagination", "WebSockets", "Ordering", "Delivery"],
     designs: ["Newsfeed or Timeline"],
-    hours: "5–6 h",
+    extraDesigns: [],
   },
   {
     week: 5,
@@ -87,7 +111,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Design ledgers, presence, notification orchestration, and large-object ingestion that survive ambiguous outcomes.",
     topics: ["Presence", "Ledgers", "Notifications", "Multipart upload", "Content addressing", "Idempotent effects"],
     designs: ["Chat and Messaging", "Payment and Ledger System"],
-    hours: "6–7 h",
+    extraDesigns: ["Notification System"],
   },
   {
     week: 6,
@@ -96,7 +120,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Handle offline conflicts, spatial indexing and its privacy duties, crawling, and incremental index serving.",
     topics: ["File sync", "Spatial indexes", "Crawl frontier", "Politeness", "Inverted indexes", "Segment merging"],
     designs: ["File Storage and Synchronization", "Nearby-Location Service"],
-    hours: "6–7 h",
+    extraDesigns: [],
   },
   {
     week: 7,
@@ -104,8 +128,8 @@ export const curriculumWeeks: WeekPlan[] = [
     tier: 1,
     focus: "Instrument high-cardinality telemetry, define SLOs and degradation, plan regional recovery, then run a timed classic mock.",
     topics: ["Cardinality", "Retention", "SLOs", "Backpressure", "Multi-region", "Interview clock"],
-    designs: ["Web Crawler and Search Index", "Observability Platform"],
-    hours: "7–8 h",
+    designs: ["Web Crawler and Search Index", "Metrics, Logging, and Observability Platform"],
+    extraDesigns: [],
   },
   {
     week: 8,
@@ -114,7 +138,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Connect a product decision to targets, labels with point-in-time correctness, and a feature platform without skew.",
     topics: ["Problem framing", "Metrics and slices", "Labels", "Leakage", "Feature stores", "Training-serving skew"],
     designs: ["Recommendation feed"],
-    hours: "5–6 h",
+    extraDesigns: ["ETA prediction"],
   },
   {
     week: 9,
@@ -123,7 +147,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Build two-stage retrieval and ranking, then make probabilities and thresholds usable as decisions.",
     topics: ["ANN and HNSW", "Two-stage ranking", "Position bias", "Registry", "Calibration", "Delayed labels"],
     designs: ["Search ranking", "Ads click-through-rate prediction"],
-    hours: "6–7 h",
+    extraDesigns: ["Credit-risk scoring"],
   },
   {
     week: 10,
@@ -132,7 +156,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Measure impact trustworthily, roll out with guardrails, monitor drift and feedback loops, then run an ML mock.",
     topics: ["A/B testing", "SRM", "Interference", "Canary and rollback", "Drift", "Feedback loops"],
     designs: ["Real-time fraud detection", "Content moderation"],
-    hours: "6–7 h",
+    extraDesigns: ["Personalized notifications"],
   },
   {
     week: 11,
@@ -141,7 +165,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Balance KV memory, batching, parallelism, and retrieval quality across serving and distributed training.",
     topics: ["Prefill and decode", "KV cache", "Continuous batching", "Paged attention", "Parallelism", "RAG"],
     designs: ["Large-scale LLM serving", "Enterprise RAG assistant"],
-    hours: "7–8 h",
+    extraDesigns: [],
   },
   {
     week: 12,
@@ -150,7 +174,7 @@ export const curriculumWeeks: WeekPlan[] = [
     focus: "Close post-training, evaluation, safety, and cost, then convert everything into spoken 40–45 minute designs.",
     topics: ["Post-training", "Evaluation", "Judges", "Prompt injection", "Unit economics", "Executive close"],
     designs: ["Multi-model inference gateway", "Post-training platform"],
-    hours: "7–8 h",
+    extraDesigns: ["Generative evaluation platform", "Human-preference collection and arena"],
   },
 ];
 
@@ -187,112 +211,29 @@ export const allTopics: StudyTopic[] = attachPrimers([...foundationTopics, ...cl
 
 export const designPrompts: DesignPrompt[] = [...foundationPrompts, ...classicPrompts, ...mlPrompts, ...llmPrompts];
 
-function assertStudyContent(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(`Study content invariant failed: ${message}`);
+/**
+ * Weekly effort is computed, not asserted. The hand-written figures had drifted
+ * from the module times rendered directly beneath them on the same card, and
+ * they drifted hardest in the tier-2 and tier-3 weeks, whose design prompts run
+ * 55-60 minutes rather than 40.
+ */
+function weekHours(seed: WeekPlanSeed, topics: StudyTopic[], prompts: DesignPrompt[]): string {
+  const moduleMinutes = topics
+    .filter((topic) => topic.week === seed.week)
+    .reduce((sum, topic) => sum + topic.estimatedMinutes, 0);
+  const designMinutes = seed.designs.reduce((sum, title) => {
+    const prompt = prompts.find((candidate) => candidate.title === title);
+    return sum + (prompt?.durationMinutes ?? 0);
+  }, 0);
+  const total = (moduleMinutes + designMinutes) / 60;
+  const low = Math.floor(total);
+  return low === total ? `${total} h` : `${low}–${low + 1} h`;
 }
 
-function validateStudyContent(topics: StudyTopic[], prompts: DesignPrompt[]) {
-  assertStudyContent(topics.length === 53, "the complete syllabus must contain 53 modules");
-  assertStudyContent(prompts.length === 25, "the design library must contain 25 prompts");
-  assertStudyContent(new Set(topics.map((topic) => topic.id)).size === topics.length, "topic IDs must be unique");
-  assertStudyContent(new Set(prompts.map((prompt) => prompt.id)).size === prompts.length, "prompt IDs must be unique");
-
-  const expectedWeekCounts = [4, 4, 5, 4, 4, 4, 5, 4, 5, 4, 5, 5];
-  for (let week = 1; week <= 12; week += 1) {
-    assertStudyContent(topics.filter((topic) => topic.week === week).length === expectedWeekCounts[week - 1], `week ${week} module count is incomplete`);
-  }
-
-  assertStudyContent(prompts.filter((prompt) => prompt.category === "classic").length === 11, "classic prompt library is incomplete");
-  assertStudyContent(prompts.filter((prompt) => prompt.category === "ml").length === 8, "ML prompt library is incomplete");
-  assertStudyContent(prompts.filter((prompt) => prompt.category === "llm").length === 6, "LLM prompt library is incomplete");
-
-  for (const topic of topics) {
-    assertStudyContent(topic.summary.length >= 80, `${topic.id} needs a substantive summary`);
-    assertStudyContent(topic.whyItMatters.length >= 80, `${topic.id} needs senior-level context`);
-    assertStudyContent(topic.deepDive.length >= 3, `${topic.id} needs three deep dives`);
-    assertStudyContent(topic.deepDive.every((section) => section.points.length >= 2), `${topic.id} deep dives need mechanics`);
-    assertStudyContent(topic.tradeoffs.length >= 3, `${topic.id} needs three explicit trade-offs`);
-    assertStudyContent(topic.failureModes.length >= 3, `${topic.id} needs three diagnosed failure modes`);
-    assertStudyContent(topic.decisionChecklist.length >= 4, `${topic.id} needs a decision checklist`);
-    assertStudyContent(topic.quiz.length >= 2, `${topic.id} needs two recall checks`);
-    assertStudyContent(topic.recallCards.length >= 2, `${topic.id} needs two free-recall cards`);
-    for (const card of topic.recallCards) {
-      assertStudyContent(card.prompt.length >= 40, `${topic.id} recall prompt is too thin`);
-      assertStudyContent(card.answer.length >= 200, `${topic.id} recall answer must be a full model answer`);
-    }
-    for (const question of topic.quiz) {
-      assertStudyContent(question.options.length >= 3, `${topic.id} quiz needs plausible options`);
-      assertStudyContent(question.answerIndex >= 0 && question.answerIndex < question.options.length, `${topic.id} quiz answer is invalid`);
-      assertStudyContent(question.explanation.length >= 40, `${topic.id} quiz needs an explanation`);
-    }
-
-    // The beginner layer. These thresholds exist because the failure mode they
-    // guard against is a primer that technically exists and explains nothing.
-    const { primer, glossary } = topic;
-    assertStudyContent(primer.plainSummary.length >= 200, `${topic.id} needs a plain-language summary that actually explains the module`);
-    assertStudyContent(primer.analogy.length >= 200, `${topic.id} needs a concrete analogy, not a one-line comparison`);
-    assertStudyContent(primer.sections.length >= 3, `${topic.id} primer needs at least three build-up sections`);
-    for (const section of primer.sections) {
-      assertStudyContent(section.heading.length >= 10, `${topic.id} primer section needs a real heading`);
-      assertStudyContent(section.body.length >= 2, `${topic.id} primer section needs connected paragraphs, not a single line`);
-      // Substance is measured over the section, not per paragraph: a one-line
-      // lede or an enumerated item is good prose, and a per-paragraph floor
-      // would only force it to be padded.
-      const prose = section.body.join(" ");
-      assertStudyContent(prose.length >= 700, `${topic.id} primer section "${section.heading}" is too thin to teach anything`);
-      for (const paragraph of section.body) {
-        assertStudyContent(paragraph.length >= 60, `${topic.id} primer has an empty or stub paragraph`);
-      }
-    }
-    assertStudyContent(primer.workedExample.setup.length >= 100, `${topic.id} worked example needs a concrete setup`);
-    assertStudyContent(primer.workedExample.steps.length >= 5, `${topic.id} worked example needs at least five steps`);
-    for (const step of primer.workedExample.steps) {
-      assertStudyContent(step.length >= 80, `${topic.id} worked example step is too thin`);
-    }
-    assertStudyContent(primer.workedExample.takeaway.length >= 150, `${topic.id} worked example needs a takeaway that generalises`);
-
-    assertStudyContent(glossary.length >= 8, `${topic.id} needs a glossary covering the terms it uses`);
-    assertStudyContent(new Set(glossary.map((entry) => entry.term)).size === glossary.length, `${topic.id} glossary has duplicate terms`);
-    for (const entry of glossary) {
-      assertStudyContent(entry.definition.length >= 60, `${topic.id} glossary entry "${entry.term}" needs a real definition`);
-      // An acronym without its expansion is exactly what this module set out to fix.
-      const looksLikeAcronym = /^[A-Z0-9]{2,6}(\/[A-Z0-9]{2,6})*$/.test(entry.term);
-      assertStudyContent(!looksLikeAcronym || Boolean(entry.expansion), `${topic.id} glossary acronym "${entry.term}" must be expanded`);
-    }
-  }
-
-  for (const prompt of prompts) {
-    const referenceGroups = [
-      prompt.reference.scope,
-      prompt.reference.apis,
-      prompt.reference.dataModel,
-      prompt.reference.architecture,
-      prompt.reference.invariants,
-      prompt.reference.deepDives,
-      prompt.reference.scaling,
-      prompt.reference.observability,
-    ];
-    assertStudyContent(referenceGroups.every((group) => group.length >= 2), `${prompt.id} reference is incomplete`);
-
-    const { diagram } = prompt.reference;
-    const nodeIds = new Set(diagram.nodes.map((node) => node.id));
-    assertStudyContent(diagram.nodes.length >= 6, `${prompt.id} diagram needs a real component set`);
-    assertStudyContent(diagram.edges.length >= 6, `${prompt.id} diagram needs the flow between components`);
-    assertStudyContent(nodeIds.size === diagram.nodes.length, `${prompt.id} diagram node ids must be unique`);
-    assertStudyContent(diagram.caption.length >= 60, `${prompt.id} diagram needs an explanatory caption`);
-    for (const edge of diagram.edges) {
-      assertStudyContent(nodeIds.has(edge.from) && nodeIds.has(edge.to), `${prompt.id} diagram edge references a missing node`);
-    }
-    // Two nodes sharing a cell would render on top of each other.
-    const cells = diagram.nodes.map((node) => `${node.col}:${node.row}`);
-    assertStudyContent(new Set(cells).size === cells.length, `${prompt.id} diagram has overlapping nodes`);
-    // A node nothing connects to is almost always an authoring slip.
-    const connected = new Set(diagram.edges.flatMap((edge) => [edge.from, edge.to]));
-    assertStudyContent(diagram.nodes.every((node) => connected.has(node.id)), `${prompt.id} diagram has an unconnected node`);
-  }
-}
-
-validateStudyContent(allTopics, designPrompts);
+export const curriculumWeeks: WeekPlan[] = weekPlanSeeds.map((seed) => ({
+  ...seed,
+  hours: weekHours(seed, allTopics, designPrompts),
+}));
 
 export const estimationDrills: EstimationDrill[] = [
   {
@@ -300,7 +241,7 @@ export const estimationDrills: EstimationDrill[] = [
     title: "Redirect traffic",
     kind: "QPS + bandwidth",
     prompt: "A URL shortener serves 100M redirects/day. Peak traffic is 5× average and each response transfers 700 bytes. Estimate peak QPS and peak egress.",
-    assumptions: ["A day is approximately 100,000 seconds", "Peak factor is 5", "Ignore request ingress"],
+    assumptions: ["A day is 86,400 s, rounded to 100,000 for one-significant-digit work", "Peak factor is 5", "Ignore request ingress"],
     steps: ["100M ÷ 100k ≈ 1,000 average QPS", "1,000 × 5 ≈ 5,000 peak QPS", "5,000 × 700 B ≈ 3.5 MB/s"],
     answer: "≈5,000 peak redirects/s and ≈3.5 MB/s peak response egress.",
     architecturalInterpretation: "Raw bandwidth is modest; cache hit rate, p99 latency, hot-link skew, and regional failure load are the real design drivers.",
@@ -375,15 +316,46 @@ export const estimationDrills: EstimationDrill[] = [
     answer: "≈1.23 TB vectors plus ≈0.10 TB graph links before metadata, allocator overhead, and replicas.",
     architecturalInterpretation: "A full in-memory exact representation is expensive. Quantization, sharding, filtered routing, and a disk-backed or compressed tier may be needed; benchmark recall and latency on the actual distribution.",
   },
+  {
+    id: "token-unit-economics",
+    title: "Cost per million tokens",
+    kind: "Unit economics",
+    prompt: "An inference fleet runs on GPUs billed at $2.50/GPU-hour on reserved capacity. One GPU sustains 1,200 output tokens/s at the target SLO, and the fleet averages 60% utilization across the day. Estimate the cost per million output tokens, then the same figure at 80% utilization.",
+    assumptions: ["$2.50 per GPU-hour, reserved", "1,200 sustained output tokens/s per GPU at the SLO", "60% average utilization, then 80%", "Prefill and prompt tokens are modeled separately"],
+    steps: [
+      "3,600 s × 1,200 tokens/s = 4.32M output tokens per GPU-hour at saturation",
+      "4.32M × 0.60 ≈ 2.6M billable output tokens per GPU-hour",
+      "$2.50 ÷ 2.6M ≈ $0.96 per million output tokens",
+      "At 80%: 4.32M × 0.80 ≈ 3.46M, so $2.50 ÷ 3.46M ≈ $0.72 per million",
+    ],
+    answer: "≈$0.96 per million output tokens at 60% utilization, falling to ≈$0.72 at 80%.",
+    architecturalInterpretation: "Utilization is a first-class cost lever, which is why batching, admission, and routing are economic decisions and not only latency ones. Note the scope: this prices decode alone, and for retrieval-heavy workloads the prompt-to-output ratio and the prefix-cache hit rate can dominate the bill.",
+  },
+  {
+    id: "pretraining-scale",
+    title: "Pretraining run",
+    kind: "GPU-hours + checkpoints",
+    prompt: "Pretrain a 30-billion-parameter dense model on 2 trillion tokens. Assume 6 FLOPs per parameter per token for forward plus backward, and GPUs delivering 400 teraFLOP/s of useful throughput. Estimate total FLOPs, GPU-hours, wall clock on 1,024 GPUs, and checkpoint size and write bandwidth.",
+    assumptions: ["6 FLOPs per parameter per token", "400 TFLOP/s useful per GPU after model FLOPs utilization", "1,024 GPUs at near-linear scaling", "Mixed-precision Adam: 12 bytes/parameter of master weights plus moments"],
+    steps: [
+      "6 × 30e9 params × 2e12 tokens = 3.6e23 FLOPs for the whole run",
+      "3.6e23 ÷ 4e14 FLOP/s = 9e8 GPU-seconds = 250,000 GPU-hours",
+      "250,000 ÷ 1,024 ≈ 244 hours ≈ 10 days, before restarts, stragglers, and evaluation",
+      "Checkpoint = 30e9 × 12 B ≈ 360 GB of master weights and optimizer moments",
+      "Checkpointing every 30 minutes is ≈488 writes; a 60-second write window needs ≈6 GB/s sustained to durable storage",
+    ],
+    answer: "≈3.6 × 10²³ FLOPs, ≈250,000 GPU-hours (≈10 days on 1,024 GPUs), ≈360 GB per checkpoint at ≈6 GB/s.",
+    architecturalInterpretation: "The FLOP count sets the budget; the checkpoint bandwidth decides whether the run survives. A restart costs one checkpoint interval of compute across the whole fleet, so the interval is a trade between storage bandwidth and expected preemption rate rather than a default to accept.",
+  },
 ];
 
 export const interviewPhases: InterviewPhase[] = [
-  { id: "clarify", label: "Clarify", minutes: "3–5", description: "Users, operations, scale, SLAs, invariants, security, and scope." },
-  { id: "estimate", label: "Estimate", minutes: "3–5", description: "Only numbers that can change architecture." },
-  { id: "contract", label: "APIs + data", minutes: "3–5", description: "Contracts, entities, keys, indexes, labels, and events." },
-  { id: "architecture", label: "Architecture", minutes: "5–7", description: "Components plus one complete request or data flow." },
-  { id: "deep-dive", label: "Deep dive", minutes: "15–20", description: "The dominant risk: consistency, ranking, queues, GPUs, or regions." },
-  { id: "reliability", label: "Reliability", minutes: "≈5", description: "Failures, monitoring, security, cost, degradation, and 10× evolution." },
+  { id: "clarify", label: "Clarify", share: 0.1, description: "Users, operations, scale, SLAs, invariants, security, and scope." },
+  { id: "estimate", label: "Estimate", share: 0.1, description: "Only numbers that can change architecture." },
+  { id: "contract", label: "APIs + data", share: 0.1, description: "Contracts, entities, keys, indexes, labels, and events." },
+  { id: "architecture", label: "Architecture", share: 0.15, description: "Components plus one complete request or data flow." },
+  { id: "deep-dive", label: "Deep dive", share: 0.42, description: "The dominant risk: consistency, ranking, queues, GPUs, or regions." },
+  { id: "reliability", label: "Reliability", share: 0.13, description: "Failures, monitoring, security, cost, degradation, and 10× evolution." },
 ];
 
 export const standardQuestions: StandardQuestion[] = [

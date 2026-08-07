@@ -7,12 +7,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 1,
     tier: 2,
     title: "Frame the ML problem before choosing a model",
-    eyebrow: "Week 5 · Day 1",
+    eyebrow: "Decisions before models",
     estimatedMinutes: 55,
     summary:
       "Translate a product goal into a decision, prediction unit, horizon, objective, constraints, and a baseline that can prove ML is worth operating.",
     whyItMatters:
-      "Senior candidates are judged on whether they design the right decision system. A sophisticated model attached to the wrong label, horizon, or intervention cannot create reliable product value.",
+      "A notification model that predicts click probability perfectly still cannot tell you how many notifications to send, to whom, or whether sending is permitted at all. That gap between an estimate and an action is where most machine-learning product failures actually live. The decision contract - entity, decision time, horizon, eligible population, action, and fallback - is what closes it, and it costs an afternoon to write before any training job runs. Skip it and the team discovers six months later that training rows, serving requests, and the metric denominator describe three different populations.",
     objectives: [
       "Separate the user outcome, business outcome, model output, and downstream decision.",
       "Define the unit of prediction, decision time, prediction horizon, and eligible population.",
@@ -46,7 +46,7 @@ export const mlTopics: RawStudyTopic[] = [
           "Optimize expected product utility under constraints, not an isolated offline score.",
         points: [
           "Express a first-order policy objective as expected utility E[U(a,y)] minus serving, review, and harm costs; document which terms are measured only through online experiments.",
-          "Use a cost matrix to expose asymmetric mistakes. If false negatives cost C_FN and false positives cost C_FP, a calibrated probability can be thresholded near C_FP / (C_FP + C_FN) before operational constraints.",
+          "Use a cost matrix to expose asymmetric mistakes. If false negatives cost C_FN and false positives cost C_FP, a calibrated probability can be thresholded near C_FP / (C_FP + C_FN) before operational constraints; with a false approval costing 90 and a false decline costing 10 that puts the starting cut at 10/(10+90) = 0.10, not the reflexive 0.5.",
           "Audit proxy gaps: engagement can reward outrage, approval rate can hide risk selection, and average ETA error can hide severe tail misses.",
         ],
       },
@@ -55,9 +55,18 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "A baseline anchors complexity, feasibility, and the minimum evidence required to launch.",
         points: [
-          "Start with current policy, random or popularity ranking, rules, and a simple interpretable model evaluated on the same point-in-time split.",
-          "Decompose value into data lift, model lift, and policy lift so gains are not incorrectly attributed to architecture.",
+          "Start by replaying the current policy on the same point-in-time split, then add a popularity or most-recent heuristic, then logistic regression over ten features. Anything that comes close is a warning about how much the model is really contributing.",
+          "Decompose value into data lift, model lift, and policy lift so gains are not incorrectly attributed to architecture. If the popularity baseline already captures 8 of 10 points of offline lift, the architecture did not earn them.",
           "Predeclare offline gates, online success and guardrails, a latency budget, and rollback conditions before expensive training or infrastructure work.",
+        ],
+      },
+      {
+        title: "Constraints stated as numbers",
+        summary:
+          "A constraint that cannot fail a design review is not a constraint; it is an adjective.",
+        points: [
+          "Write each hard limit as something a build can be checked against. A p99 scoring budget of 30 ms inside a 200 ms page, a review team that clears 2,000 cases a day, a legal rule naming attributes that may not enter the model or any proxy for them: each of those settles an argument. \"Fast\", \"fair\", and \"cheap\" settle nothing and survive to the launch review unchallenged.",
+          "Separate the limits that bind the model from the limits that bind the policy. The 30 ms budget binds the model; a cap of three notifications per user per week binds the policy, and folding that cap into the loss function hides it from every person who will later need to change it without retraining anything.",
         ],
       },
     ],
@@ -114,27 +123,51 @@ export const mlTopics: RawStudyTopic[] = [
     ],
     exercise:
       "Write the decision contract for a notification send: include eligible user-event pairs, score semantics, send-cap policy, outcome horizon, error costs, baseline, and a no-model fallback. Draw the boundary between model and policy components.",
-    prerequisites: ["ml-design-overview"],
+    prerequisites: ["estimation", "storage-indexing"],
     relatedDesigns: ["personalized-notifications", "fraud-detection", "credit-risk"],
     quiz: [
       {
         prompt: "A calibrated model predicts loss probability p. A false approval costs 90 and a false decline costs 10. Ignoring other constraints, which decline threshold is the correct starting point?",
-        options: ["0.10", "0.50", "0.90", "It cannot be derived from costs"],
+        options: ["0.10, from 10/(10+90)", "0.50, the neutral cut", "0.90, from 90/(10+90)", "None; costs cannot set it"],
         answerIndex: 0,
         explanation:
-          "Decline when p times 90 exceeds (1-p) times 10, which gives p > 10/(90+10) = 0.10.",
+          "Decline when p times 90 exceeds (1-p) times 10, so p > 10/(90+10) = 0.10. Choosing 0.90 inverts the ratio, and choosing 0.50 assumes the symmetric costs this cost matrix explicitly denies.",
       },
       {
         prompt: "Why should an ML design specify a non-ML baseline?",
         options: [
-          "It eliminates the need for online experiments.",
-          "It proves whether incremental ML complexity creates measurable lift and supplies a fallback.",
-          "It guarantees calibrated probabilities.",
-          "It makes feature freshness irrelevant.",
+          "It removes the need for an online experiment.",
+          "It guarantees the scores will be calibrated.",
+          "It isolates model lift and doubles as a fallback.",
+          "It makes feature freshness irrelevant later.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "A comparable baseline separates data lift and policy lift from model lift and can be served when the model is unavailable. The tempting wrong answer is that a baseline replaces online measurement: an offline comparison is still not a causal estimate of product value.",
+      },
+      {
+        prompt: "The true outcome, 90-day retention, matures far more slowly than the weekly iteration loop. What does the module recommend?",
+        options: [
+          "Shorten the horizon so the label matures daily.",
+          "Use a validated proxy and monitor its alignment.",
+          "Promote the proxy itself to the product goal.",
+          "Wait for mature labels before any experiment.",
         ],
         answerIndex: 1,
         explanation:
-          "A comparable baseline separates genuine model value from data or policy changes and provides graceful degradation.",
+          "A validated proxy is legitimate when the true outcome is delayed, provided proxy-to-outcome alignment stays monitored and guarded. Promoting the proxy to the goal is the Goodhart failure this module names: engagement optimized for its own sake rewards outrage.",
+      },
+      {
+        prompt: "After launch, offline AUC and click-through both improve while complaint rate rises and task success falls. Which failure does the module name?",
+        options: [
+          "The prediction unit and horizon were ambiguous.",
+          "No credible non-ML baseline was ever measured.",
+          "The eligible population was defined too widely.",
+          "The label measures a proxy, not the outcome.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Proxy metrics rising while outcome metrics fall is the signature of a label that measures something convenient rather than the desired result. Ambiguous units produce a different symptom: training rows, serving requests, and metric denominators describing different populations.",
       },
     ],
     recallCards: [
@@ -148,17 +181,17 @@ export const mlTopics: RawStudyTopic[] = [
     day: 2,
     tier: 2,
     title: "Select metrics and evaluate the slices that matter",
-    eyebrow: "Week 5 · Day 2",
+    eyebrow: "Measure at the operating point",
     estimatedMinutes: 65,
     summary:
       "Build an offline and online metric stack that reflects prevalence, ranking position, probability quality, product utility, and performance on consequential slices.",
     whyItMatters:
-      "Aggregate AUC can hide an unusable operating point or a broken cohort. Interviewers expect candidates to connect model metrics to decisions and product guardrails.",
+      "A fraud model with 0.97 ROC-AUC is still worthless to a team that can review 2,000 cases a day, because the only number that decides whether that queue is usable is precision at the capacity the business actually staffs.",
     objectives: [
       "Choose discrimination, ranking, calibration, and decision metrics for the actual serving policy.",
       "Explain why ROC-AUC can look strong on rare-event problems while precision is poor.",
       "Evaluate stable, sufficiently powered slices without turning dashboards into a multiple-testing trap.",
-      "Connect offline metrics to online success, guardrails, latency, and availability.",
+      "Connect offline metrics to online success, blocking guardrail metrics, latency, and availability.",
     ],
     concepts: [
       "precision and recall",
@@ -179,6 +212,7 @@ export const mlTopics: RawStudyTopic[] = [
           "ROC plots TPR = TP/(TP+FN) against FPR = FP/(FP+TN). ROC-AUC is the probability a random positive outranks a random negative and can remain high despite many false positives when negatives dominate.",
           "PR plots precision = TP/(TP+FP) against recall = TPR. Its no-skill precision baseline equals positive prevalence, so PR-AUC exposes whether alerts remain useful on rare events.",
           "Compare models at the feasible operating region: precision at review capacity, recall at a false-positive budget, or expected utility—not only whole-curve area.",
+          "Put both error axes on the same scale before arguing. At 1% prevalence over 1,000,000 daily events there are 10,000 positives and 990,000 negatives, so a false-positive rate of only 0.5% still contributes 4,950 false alerts—the same order of magnitude as every true positive that exists in the day.",
         ],
       },
       {
@@ -188,7 +222,7 @@ export const mlTopics: RawStudyTopic[] = [
         points: [
           "Log loss averages -[y log p + (1-y) log(1-p)] and strongly penalizes confident mistakes; Brier score averages (p-y)^2 and measures probabilistic accuracy.",
           "For ordered lists, DCG@k sums gain_i/log2(i+1); NDCG divides by the ideal DCG. Add recall@k for candidate coverage and task-specific diversity or safety constraints.",
-          "Offline metrics are gates, not causal product estimates. Online metrics measure behavior, while complaint rate, latency, cost, fairness, and safety protect against local optimization.",
+          "Offline metrics are gates, not causal product estimates. Online metrics measure behavior, while complaint rate, latency, cost, fairness, and safety protect against local optimization. Keep the two roles named apart: a guardrail metric is a blocking release gate that stops a launch when it regresses, whereas a signal that is only watched is a monitored metric and blocks nothing.",
         ],
       },
       {
@@ -196,9 +230,10 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Slices turn aggregate performance into a deployability assessment.",
         points: [
-          "Predeclare slices tied to product mechanics: cold start, geography, device, traffic source, label delay, long-tail items, and operational severity.",
-          "Report denominator, prevalence, confidence interval, calibration, and the chosen operating-point metric per slice; tiny slices need pooling or uncertainty, not confident rankings.",
-          "Gate on critical slice regressions and monitor the worst supported slice, but control repeated comparisons and avoid discovering a bespoke slice only after seeing outcomes.",
+          "Predeclare the slices that product mechanics predict will break: users in their first session, each launch locale, low-end Android, and items outside the top 10,000 by popularity. A slice discovered after the results are in is hypothesis generation, not evidence.",
+          "Report every slice with its denominator and a bootstrap interval beside the point estimate, because a slice of 300 cases cannot tell 60% precision apart from 45%. Pool or shrink the thin ones rather than ranking them.",
+          "Gate the release on regressions in the slices you named as critical, and keep the worst adequately supported slice on the dashboard as a standing number.",
+          "Control repeated comparison. Forty slice tests at alpha 0.05 will surface about two nominal regressions on a model that changed nothing, so a post-hoc cut is a hypothesis to confirm on fresh data, not a result to block on.",
         ],
       },
     ],
@@ -242,7 +277,7 @@ export const mlTopics: RawStudyTopic[] = [
     interviewQuestions: [
       "At what operating point will this model run, and why is that point affordable?",
       "When can ROC-AUC be misleading even if it is mathematically correct?",
-      "Which slices deserve launch gates rather than dashboard-only monitoring?",
+      "Which slices deserve guardrail metrics that block a launch, and which only deserve monitored metrics on a dashboard?",
       "What evidence would convince you that the offline metric is causally connected to user value?",
     ],
     decisionChecklist: [
@@ -251,7 +286,7 @@ export const mlTopics: RawStudyTopic[] = [
       "Tie the operating point to cost, capacity, or a product constraint.",
       "Predeclare consequential slices and minimum support.",
       "Report uncertainty and compare against a shared baseline.",
-      "Specify online success, guardrails, and an offline-to-online validation plan.",
+      "Specify online success metrics, blocking guardrail metrics, monitored metrics, and an offline-to-online validation plan.",
     ],
     exercise:
       "Design a metric component that ingests scored examples and slice keys, then outputs ROC-AUC, PR-AUC, log loss, calibration error, and precision/recall at a review budget with bootstrap intervals. Explain how you prevent tiny or overlapping slices from creating false alarms.",
@@ -261,21 +296,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "Why can a 1% prevalence classifier have a strong ROC-AUC but unusable precision?",
         options: [
-          "ROC-AUC always assumes balanced training data.",
-          "Even a small false-positive rate applied to the 99% negative class can outnumber true positives.",
-          "Precision is independent of prevalence.",
-          "ROC-AUC measures calibration rather than ranking.",
+          "ROC-AUC assumes the training data was balanced.",
+          "A small FPR on the 99% negatives swamps positives.",
+          "Precision does not depend on class prevalence.",
+          "ROC-AUC measures calibration, not ranking order.",
         ],
         answerIndex: 1,
         explanation:
-          "The large negative population can generate many false positives even at low FPR; precision includes those false positives and depends on prevalence.",
+          "False-positive rate divides by the huge negative pool, so a low FPR still produces many false positives, and precision counts every one of them. The tempting error is believing precision is prevalence-independent, when prevalence is exactly what moves it.",
       },
       {
         prompt: "Which metric directly assesses the quality of probabilities used by several downstream thresholds?",
-        options: ["Recall@k", "MRR", "Log loss", "Coverage"],
+        options: [
+          "Recall@k on retrieved items",
+          "Mean reciprocal rank of hits",
+          "ROC-AUC across all thresholds",
+          "Log loss on predicted risk",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Log loss is a proper scoring rule, minimized only by true probabilities, so it certifies scores that several policies will threshold. Ranking metrics such as MRR and ROC-AUC are invariant to any monotone rescaling and stay perfect on badly calibrated scores.",
+      },
+      {
+        prompt: "Reviewers handle 2,000 cases a day. Daily volume is 1,000,000 at 1% prevalence, and at the chosen cut the 2,000 alerts contain 600 true positives. What is the operating point?",
+        options: [
+          "Precision 30%, recall 6% at review capacity.",
+          "Precision 6%, recall 30% at review capacity.",
+          "Precision 30%, recall 30% at review capacity.",
+          "Precision 60%, recall 6% at review capacity.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "Precision is 600/2,000 = 30% and recall is 600/10,000 = 6%, so the queue is affordable while 94% of positives are never seen. Swapping the two denominators is the standard slip, and it makes a capacity-limited system look coverage-complete.",
+      },
+      {
+        prompt: "A dashboard reports 40 predefined and ad-hoc slices, and three regress at p below 0.05. What does the module prescribe?",
+        options: [
+          "Block the release on all three of the regressed slices.",
+          "Stop slicing and gate on the global metric only.",
+          "Ask whether the slices were predeclared and powered.",
+          "Rerun until the three slices stop regressing.",
+        ],
         answerIndex: 2,
         explanation:
-          "Log loss is a proper scoring rule for predicted probabilities; ranking-only metrics do not establish probability quality.",
+          "Across forty comparisons a few nominal regressions are expected by chance, so gates apply only to predeclared, sufficiently supported slices and post-hoc cuts are hypotheses needing confirmation. Blocking on every significant slice is the multiple-testing trap; dropping slices entirely is the opposite error that lets a broken cohort hide in the average.",
       },
     ],
     recallCards: [
@@ -295,12 +359,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 3,
     tier: 2,
     title: "Build labels and datasets with point-in-time correctness",
-    eyebrow: "Week 5 · Day 3",
+    eyebrow: "Only what was knowable then",
     estimatedMinutes: 70,
     summary:
       "Design event, annotation, and dataset pipelines whose labels mean what the decision needs and whose features contain only information available at prediction time.",
     whyItMatters:
-      "Most spectacular offline failures are data failures: label ambiguity, selection bias, leakage, late events, or silent schema changes. Senior MLEs make data semantics testable.",
+      "Leakage does not announce itself as a bug; it announces itself as a great result. An offline AUC that jumps from 0.78 to 0.94 after a feature-engineering sprint is far more often a timestamp mistake than a breakthrough, and the usual culprit is a feature joined on when the fact became true rather than on when the serving path could have read it. Everything in this module exists to make that difference testable instead of a matter of someone remembering.",
     objectives: [
       "Specify observable label rules, attribution windows, censoring, and negative eligibility.",
       "Detect target, temporal, group, and train-test contamination.",
@@ -323,9 +387,10 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "A label requires an event rule, attribution rule, observation horizon, and mature-negative policy.",
         points: [
-          "For an example anchored at decision time t, define positive events in (t, t+h], exclusions, duplicate handling, and when the row becomes label-complete.",
-          "Do not mark an unlabeled, still-maturing example negative. Store label_status and mature_at; account for right censoring when observation windows differ.",
+          "Anchor the example at decision time t and say which events inside the window (t, t+h] count as the positive, which repeats collapse into one, and at what instant the row becomes label-complete. Every one of those left unwritten becomes a judgment call that two pipelines will make differently.",
+          "Do not mark an unlabeled, still-maturing example negative. Store label_status and mature_at; account for right censoring when observation windows differ. With a 60-day chargeback window, a nightly job over the trailing 90 days holds only 30 days of label-complete rows.",
           "Human labels need a rubric, adjudication, annotator quality checks, and agreement measures; observed enforcement actions may reflect reviewer selection rather than ground truth.",
+          "Measure how much noise the labels themselves carry before crediting any model with beating them. Send 500 items to two annotators blind; if they disagree on 12 of every 100, a one-point difference between two candidates evaluated on those labels is inside the measurement error and cannot be read as a win.",
         ],
       },
       {
@@ -335,7 +400,8 @@ export const mlTopics: RawStudyTopic[] = [
         points: [
           "Target leakage includes post-outcome fields, aggregates updated after the label event, and operational actions caused by an earlier model.",
           "Temporal leakage comes from random splits in evolving systems; group leakage comes from the same user, case, or item appearing across train and validation.",
-          "Fit normalization, vocabulary, imputation, feature selection, and resampling only on training partitions; dataset transforms can leak even when raw columns do not.",
+          "Fit every learned transform on the training partition alone - the normalization statistics, the token vocabulary, the imputation fills, the selected feature subset, the resampling ratio. A dataset transform leaks with every raw column clean, which is why this variety survives code review so reliably.",
+          "Audit the feature list against the clock, one column at a time. The question is never whether a column looks suspicious but which timestamp made its value writable, and whether that instant precedes t. It is the same question that makes merchant_chargeback_rate_90d a leak in a transaction-risk model and a perfectly legitimate feature in a merchant-onboarding model.",
         ],
       },
       {
@@ -345,7 +411,16 @@ export const mlTopics: RawStudyTopic[] = [
         points: [
           "For each prediction row at t, join the latest feature event whose event_time <= t and availability_time <= simulated execution time; use versioned as-of semantics.",
           "Late corrections require bitemporal records or immutable versions so a backfill does not rewrite history with newly known values.",
-          "Validate keys, schema, nulls, volume, freshness, uniqueness, label prevalence, and distribution by source; quarantine failures and preserve dataset manifests and lineage.",
+          "Run the candidate dataset through assertions before it is allowed to become a training set: primary keys unique, row count inside a band around the trailing seven-day median, null rate per column stable, newest event no older than the freshness SLA, label prevalence consistent per source. Quarantine a failing partition instead of training on it, and keep the manifest and lineage of whatever passed.",
+        ],
+      },
+      {
+        title: "Splits that mirror the deployment",
+        summary:
+          "The split is not a convention to inherit; it is a model of how the system will actually be used.",
+        points: [
+          "Derive the split from the deployment question. A model retrained monthly to serve the following month is tested by fitting on months 1 through 11 and scoring month 12, then rolling that origin forward several times to see whether the gap is stable or widening. A random 80/20 answers a question nobody in production is asking.",
+          "Nest the two isolations instead of choosing between them: keep an entity's rows together inside chronological folds, so the same merchant never lands on both sides of a boundary and the boundary itself still runs forward in time.",
         ],
       },
     ],
@@ -385,6 +460,11 @@ export const mlTopics: RawStudyTopic[] = [
         symptom: "The same dataset version produces different values or cannot be reproduced.",
         mitigation: "Use immutable snapshots or bitemporal records with manifests, checksums, and as-of joins.",
       },
+      {
+        mode: "A repeated entity straddles the split boundary",
+        symptom: "Validation error sits far below the error on a chronological holdout of the same size, and the gap grows with how often entities repeat.",
+        mitigation: "Group by the entity key before splitting, then count how many entities still cross the boundary; near-duplicate items need a similarity pass, because an identifier match will not catch a reposted listing.",
+      },
     ],
     interviewQuestions: [
       "Exactly when is a negative label mature?",
@@ -408,21 +488,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "A feature event occurred before prediction time but reached the online store two hours afterward. May the historical row use it?",
         options: [
-          "Yes, because event time is before prediction time.",
-          "Yes, if it improves recall.",
-          "No, point-in-time correctness also requires it to have been available by the simulated serving time.",
-          "No, historical joins may use only daily aggregates.",
+          "Yes - its event time precedes the prediction.",
+          "No - it was not readable by the serving path.",
+          "Yes - if it lifts offline recall materially.",
+          "No - only daily rollups may be joined here.",
         ],
-        answerIndex: 2,
+        answerIndex: 1,
         explanation:
-          "The training row must reproduce knowable information, so both event time and actual availability time matter.",
+          "Point-in-time correctness needs event time and availability time, and a fact that landed two hours late was not knowable to serving. Joining on event time alone is the most common leak, and it produces offline scores that collapse in shadow traffic.",
       },
       {
         prompt: "Which split best tests a model that retrains monthly and predicts future behavior in a changing market?",
-        options: ["Random row split", "Chronological backtest", "Alphabetical entity split", "Duplicate each row across folds"],
-        answerIndex: 1,
+        options: [
+          "A random row-level split",
+          "An alphabetical entity split",
+          "Rows duplicated across folds",
+          "A chronological backtest",
+        ],
+        answerIndex: 3,
         explanation:
-          "A chronological backtest respects causality and exposes changes between training and future serving periods.",
+          "A chronological backtest mirrors deployment by training on a past window and scoring the next one, exposing change between them. The random split is the temporal-leakage trap: it lets the model learn from the future and inflates every reported number.",
+      },
+      {
+        prompt: "Normalization statistics and the token vocabulary were fit on the full dataset before the train/validation split. Is that leakage?",
+        options: [
+          "No - only raw feature columns can leak.",
+          "No - the transform never sees a label.",
+          "Yes - fit transforms on training rows only.",
+          "Yes - but only under a temporal split.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "Normalization statistics, vocabularies, imputation, feature selection, and resampling are learned from data, so fitting them before the split carries validation information into training. The tempting belief is that leakage requires a label-derived column, but a dataset transform leaks with every raw column clean.",
+      },
+      {
+        prompt: "Chargebacks arrive up to 60 days after a transaction. The team trains nightly on the last 90 days and marks every unlabeled row negative. What breaks?",
+        options: [
+          "The freshest 60 days are mislabeled negative.",
+          "The oldest 30 days dominate the training loss.",
+          "Nothing: 90 days exceeds the 60-day window.",
+          "Only ROC-AUC moves, precision is unaffected.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "A row is label-complete only once its own 60-day window closes, so two-thirds of a 90-day training set is censored and calling it negative teaches the model that recent means safe. Confusing the lookback length with per-row maturity is the specific error here.",
       },
     ],
     recallCards: [
@@ -436,12 +545,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 4,
     tier: 2,
     title: "Design feature platforms with training-serving parity",
-    eyebrow: "Week 5 · Day 4",
+    eyebrow: "One definition, both paths",
     estimatedMinutes: 65,
     summary:
       "Unify feature definitions, historical materialization, low-latency serving, freshness, lineage, and backfills without pretending offline and online storage are identical.",
     whyItMatters:
-      "Models fail when a feature has different semantics, windows, defaults, or freshness in training and production. A feature platform makes those contracts reproducible and observable.",
+      "Two implementations of purchases_30d - one in a nightly Spark job, one in the serving path - will agree for months and then disagree the week a time zone, a null convention, or a window boundary changes. The platform's job is to make that divergence impossible to introduce quietly: one definition compiled into both paths, and sampled online vectors diffed against historical replay every day.",
     objectives: [
       "Separate feature definitions, offline history, online materialization, metadata, and retrieval.",
       "Guarantee semantic parity through shared transformations and request-time replay tests.",
@@ -464,7 +573,7 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "The platform owns semantic definitions and reproducible reads across time.",
         points: [
-          "A feature view declares entity keys, value type, transformation, event-time semantics, window, freshness SLA, default policy, owner, and version.",
+          "A feature view is a declaration, not a table. purchases_30d has to say which entity it is keyed by, which timestamp column defines its 30-day window, how stale the online copy may be before the read is a miss - 15 minutes, say - and what is served when it does miss; the checklist below enumerates the full set. Whatever the definition leaves implicit is exactly where batch and serving will later disagree.",
           "Offline reads produce point-in-time-correct training matrices; online reads return the latest eligible materialization under a bounded latency budget.",
           "A registry links feature version to source, transformation code, datasets, and models so impact analysis and rollback are possible.",
         ],
@@ -476,7 +585,8 @@ export const mlTopics: RawStudyTopic[] = [
         points: [
           "Batch features suit long windows and stable aggregates; streaming features suit continuously changing state; request-time features suit context known only at inference.",
           "Share transformation libraries or compile one declarative definition into batch and streaming plans, then compare online vectors with historical replay samples.",
-          "Preserve windows, time zones, null handling, vocabulary, normalization statistics, and feature order in a signed schema bundled with the model.",
+          "Bundle a signed schema with the model so the serving path can refuse a vector whose column order, vocabulary, or normalization constants no longer match what training saw. A single column shifted by one position is silent at runtime: the model scores the garbage happily and the error only shows up in the outcome metrics weeks later.",
+          "Price the parity check so that it actually runs every day. Logging one served vector in a thousand on a 20,000 QPS service is 20 rows a second, about 1.7 million a day - cheap enough to diff against a nightly replay, and dense enough that a single skewed column shows up within hours rather than at the next quarterly review.",
         ],
       },
       {
@@ -484,9 +594,11 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Every online read needs an explicit age, version, and degradation policy.",
         points: [
-          "Materializers write idempotently by entity, feature version, and effective timestamp; watermarks and freshness metrics expose late pipelines.",
+          "Materializers write idempotently by entity, feature version, and effective timestamp. Alert on the p99 of now minus effective_at per feature rather than on job success: a pipeline that finishes on schedule with an hour-old watermark is still serving hour-old values against a 15-minute SLA.",
           "Backfills write a new immutable version and are validated before promotion; they must not overwrite values used by an active model without compatibility checks.",
           "Serve bounded-staleness values, documented defaults, or a fallback model on misses; never silently substitute a semantically different feature.",
+          "Return an age with every online read, not just a value. A response shaped as value, effective_at, feature_version lets the caller decide what to do, and lets a dashboard tell \"this feature is missing\" apart from \"this feature is 40 minutes old against a 15-minute SLA\" - two conditions with completely different repairs.",
+          "Size the online store from the read pattern rather than the row count. A ranker assembling 120 features for each of 500 candidates needs 60,000 feature values per request, which is affordable only as a batched multi-get over 500 entity-keyed rows and ruinous as 60,000 individual round trips.",
         ],
       },
     ],
@@ -508,6 +620,12 @@ export const mlTopics: RawStudyTopic[] = [
         preferA: "Fail closed when an incorrect decision creates unacceptable harm.",
         preferB: "Degrade to validated defaults or a fallback when continuity is more valuable.",
         watch: "Default-rate shifts that change calibration and hidden dependence on stale values.",
+      },
+      {
+        decision: "One wide row per entity or one row per feature",
+        preferA: "Store a wide row when a single consumer reads most of the features together and one get can answer the request.",
+        preferB: "Store per-feature rows when independent producers write at different cadences and a slow feature must not delay the rest.",
+        watch: "Write amplification and read-modify-write contention on wide rows, against a read fan-out that turns one lookup into dozens on narrow ones.",
       },
     ],
     failureModes: [
@@ -549,26 +667,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "What is the strongest definition of training-serving parity?",
         options: [
-          "Training and serving use the same database.",
-          "Equivalent inputs at the same as-of time produce semantically equivalent feature vectors.",
-          "All features are computed in real time.",
-          "Online features never expire.",
+          "Training and serving read one shared database.",
+          "Every feature is recomputed at request time.",
+          "Equal inputs at one as-of time give equal vectors.",
+          "Online feature values are never allowed to expire.",
         ],
-        answerIndex: 1,
+        answerIndex: 2,
         explanation:
-          "Infrastructure can differ; parity is about equivalent definitions, time semantics, transforms, ordering, and defaults.",
+          "Parity is semantic: the same inputs at the same as-of time, through the same transform, defaults, and ordering, yield the same vector whatever the storage. The shared-database answer is the infrastructure fallacy, since one store with two transform implementations still skews.",
       },
       {
         prompt: "How should a large historical backfill reach an active model?",
         options: [
-          "Overwrite online values in place.",
-          "Skip validation because source data is trusted.",
-          "Write a new version, validate and shadow it, then atomically promote compatible consumers.",
-          "Retrain every model automatically before the backfill.",
+          "Overwrite the online values in place, then check.",
+          "Write a new version, validate, then promote it.",
+          "Skip validation because the source is trusted.",
+          "Auto-retrain every model before the backfill.",
         ],
-        answerIndex: 2,
+        answerIndex: 1,
         explanation:
-          "Versioned, gated promotion preserves reproducibility and allows rollback if recomputation changes semantics.",
+          "Backfills write an immutable new version that is validated and shadowed before consumers are switched, so recomputation cannot silently change an active model's inputs. In-place overwrite is the failure mode where a feature distribution jumps with no traffic change and history stops being reproducible.",
+      },
+      {
+        prompt: "One feature's online lookup times out during a traffic spike. Which serving behavior does the module endorse?",
+        options: [
+          "Substitute the nearest similar feature value.",
+          "Retry until it returns, whatever the latency.",
+          "Impute the mean computed over live traffic.",
+          "Serve a documented default or stale value.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "The platform must declare a degradation policy - bounded staleness or a documented default - with default rate monitored because it moves calibration. Silently substituting a semantically different feature is the forbidden move, since the model then scores a vector it never trained on.",
+      },
+      {
+        prompt: "Replay and live requests built from identical inputs produce different prediction distributions. Which cause fits the module's diagnosis?",
+        options: [
+          "The two paths implement the transform twice.",
+          "The online store was sharded onto more nodes.",
+          "The model was trained with too few epochs.",
+          "Traffic composition changed during the replay.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "Identical inputs yielding different vectors points at two implementations of one definition - different windows, null handling, or normalization statistics - so the fix is one definition compiled into both paths plus continuous vector diffing. Blaming traffic mix cannot explain a difference measured on the same inputs.",
       },
     ],
     recallCards: [
@@ -582,12 +724,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 1,
     tier: 2,
     title: "Retrieve candidates with two-tower models and ANN indexes",
-    eyebrow: "Week 5 · Day 5",
+    eyebrow: "Recall lost is unrecoverable",
     estimatedMinutes: 75,
     summary:
       "Generate a high-recall, low-latency candidate set with blended sources, learned embeddings, and an ANN index chosen for memory, freshness, and recall constraints.",
     whyItMatters:
-      "A ranker cannot recover items that retrieval omitted. Strong ML designs allocate latency and measurement to candidate coverage before debating the final model.",
+      "Retrieval sets a ceiling that ranking cannot raise. If the right item is not among the 1,000 candidates handed to the ranker, no loss function, no extra layer, and no additional feature will recover it. That is why recall@k by source is measured before anyone is allowed to argue about the ranker.",
     objectives: [
       "Design multiple candidate sources with quotas, deduplication, and source attribution.",
       "Train two-tower embeddings using meaningful positives and debiased negative sampling.",
@@ -613,6 +755,7 @@ export const mlTopics: RawStudyTopic[] = [
           "Train query encoder q(x) and item encoder v(i) so observed compatible pairs have high dot product or cosine similarity; retrieve top-k item vectors for the live query.",
           "In-batch negatives are efficient but reflect the batch sampler; add exposed-but-skipped and hard near-neighbor negatives while correcting accidental positives and popularity bias.",
           "Version encoders and embeddings together. During migration, dual-write or rebuild the index and prevent mixed-version similarity comparisons.",
+          "Budget the query side deliberately. One query-tower forward pass plus an ANN probe has to fit inside roughly 20 ms of a 200 ms feed budget, which is precisely why item vectors are encoded offline and only the query tower runs on the request path.",
         ],
       },
       {
@@ -621,18 +764,28 @@ export const mlTopics: RawStudyTopic[] = [
           "HNSW is a navigable multi-layer proximity graph with high recall and fast search at a memory cost.",
         points: [
           "Upper sparse layers make long jumps; search descends greedily, then explores a candidate frontier in the dense base layer.",
-          "M bounds stored neighbors and primarily raises index memory plus build/search work; efConstruction widens construction search and trades build time for graph quality; efSearch widens query exploration and trades query latency for recall without increasing persistent index memory.",
-          "Incremental inserts are practical, but deletions, compaction, filter selectivity, and memory overhead require explicit operations and recall measurement.",
+          "M bounds stored neighbors and primarily raises index memory plus build/search work; efConstruction widens construction search and trades build time for graph quality; efSearch widens query exploration and trades query latency for recall without increasing persistent index memory. At M = 32 the base layer alone holds about 64 neighbor ids per vector, roughly 256 bytes at four bytes each, before the vectors themselves are counted.",
+          "Incremental inserts are practical; deletion is the part that bites. A removed vector is tombstoned and still traversed during search, so both recall and memory drift away from their benchmark numbers until a rebuild, which is why a corpus with heavy churn needs a compaction schedule and a standing recall probe rather than a one-time measurement taken on the day the index was built.",
         ],
       },
       {
-        title: "IVF-PQ mechanics and source blending",
+        title: "IVF-PQ mechanics",
         summary:
           "IVF narrows search to coarse clusters; product quantization compresses residual vectors for memory-efficient distance estimates.",
         points: [
           "Train coarse centroids, assign each item to an inverted list, probe nprobe nearby lists, and approximate distances with lookup tables over quantized subvectors.",
           "More probes and finer codes improve recall but increase compute or memory; coarse quantizer quality and distribution shift determine which candidates are never visited.",
-          "Blend ANN with lexical, trending, subscription, geographic, and rule-based sources using per-source quotas; deduplicate and log source plus retrieval score for evaluation.",
+          "Do the memory arithmetic before choosing the family. Five hundred million 768-dimension float32 vectors are about 1.5 terabytes raw, whereas PQ into 64 one-byte subvector codes stores 64 bytes per item, roughly 32 gigabytes—the difference between a sharded fleet and a handful of machines.",
+        ],
+      },
+      {
+        title: "Blending sources, filters, and freshness",
+        summary:
+          "The candidate set that reaches ranking is assembled from several producers, and each one needs a quota, a deadline, and an attribution tag.",
+        points: [
+          "Blend the learned retriever with lexical match, trending, subscription, and geographic sources under explicit per-source quotas—say 400 from ANN, 200 lexical, 100 followed, 50 fresh—then deduplicate and carry source and retrieval score forward so ranking evaluation can attribute credit.",
+          "Benchmark recall with production filters attached, not on clean vectors. A predicate that leaves 2% of the corpus eligible forces the search to walk far more of the graph, so a recall figure measured at efSearch 64 on unfiltered traffic can collapse in production; overretrieve, partition by the filter value, or use a filter-aware index.",
+          "Decide how a minute-old item enters the index before you pick the structure: HNSW accepts incremental inserts, IVF-PQ usually does not without a rebuild, so freshness-sensitive products run a small delta index beside a periodically rebuilt base and search both.",
         ],
       },
     ],
@@ -695,26 +848,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "What does increasing efSearch in HNSW usually do?",
         options: [
-          "Explores more candidates, usually increasing recall and latency.",
-          "Compresses each vector into fewer bytes.",
-          "Retrains the two-tower encoders.",
-          "Guarantees exact nearest neighbors at constant cost.",
+          "Widens the frontier: more recall, more latency.",
+          "Compresses each vector into fewer stored bytes.",
+          "Rebuilds the graph and retrains the encoders.",
+          "Returns exact neighbors at unchanged cost.",
         ],
         answerIndex: 0,
         explanation:
-          "efSearch enlarges the search frontier, improving the chance of finding true neighbors at extra query work.",
+          "efSearch enlarges the query-time candidate frontier, buying recall with query work while leaving persistent index memory unchanged. Confusing it with M or efConstruction is the usual error: those raise index memory and build time, not per-query exploration.",
       },
       {
         prompt: "What is product quantization doing in IVF-PQ?",
         options: [
-          "Replicating every vector across partitions.",
-          "Encoding vector subvectors with compact codebook entries for approximate distance lookup.",
-          "Building graph edges between all item pairs.",
-          "Calibrating retrieval scores as probabilities.",
+          "It replicates each vector into every partition.",
+          "It links every pair of items with graph edges.",
+          "It codes subvectors for table-lookup distances.",
+          "It maps retrieval scores onto probabilities.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "PQ splits a vector into subvectors and stores one codebook index per subvector, so distances become table lookups at a fraction of the memory. Mistaking it for the graph structure confuses IVF-PQ with HNSW, which spends memory on neighbor links rather than saving it by compression.",
+      },
+      {
+        prompt: "Three successive ranker improvements move offline NDCG but not end-to-end quality. What should be measured first?",
+        options: [
+          "Whether the ranker needs a deeper network.",
+          "Whether MRR should replace NDCG offline.",
+          "Whether the index should switch to HNSW.",
+          "Whether retrieval surfaced the items at all.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Ranking cannot recover an item retrieval never returned, so recall@k by source and slice is measured before any ranker change is credited. Reaching for a larger ranker is the tempting response, and it cannot move quality when the relevant candidate is absent from the candidate set.",
+      },
+      {
+        prompt: "A new encoder version ships and the ANN index must migrate. What must hold during the cutover?",
+        options: [
+          "Only the item tower is refreshed, saving a rebuild.",
+          "Query and item vectors stay in one embedding space.",
+          "Mixed encoder versions are fine if recall is watched.",
+          "Cosine scores remain comparable across versions.",
         ],
         answerIndex: 1,
         explanation:
-          "PQ splits vectors into subvectors and stores codebook indices, reducing memory while approximating distances.",
+          "Similarity is only defined inside a single embedding space, so encoder and index are pinned as a compatible pair and cut over atomically, usually through dual indexes. Refreshing one tower or trusting cross-version scores is the mixed-version mistake whose symptom is recall collapsing mid-migration.",
       },
     ],
     recallCards: [
@@ -738,23 +915,23 @@ export const mlTopics: RawStudyTopic[] = [
     day: 2,
     tier: 2,
     title: "Rank in stages and enforce product constraints",
-    eyebrow: "Week 5 · Day 6",
+    eyebrow: "Spend compute as candidates shrink",
     estimatedMinutes: 75,
     summary:
       "Turn retrieved candidates into a useful slate through progressively expensive scoring, debiased learning, calibrated objectives, and deterministic policy constraints.",
     whyItMatters:
-      "Ranking is both an ML problem and a constrained decision problem. Logged interactions are shaped by the prior ranker, and unconstrained relevance can violate diversity, safety, inventory, or latency needs.",
+      "Ranking is two problems wearing one name. The first is statistical: click logs were written by the previous ranker, so a non-click means either \"not relevant\" or \"never looked at\", and a model trained without that distinction learns to reproduce whatever the incumbent already showed. The second is a constraint problem: diversity, creator caps, ad pacing, and safety are deterministic rules that can consume an entire relevance gain between the raw score and the shipped slate. A design that keeps the two apart, and logs both orders, can say which one moved.",
     objectives: [
       "Allocate candidate counts, model cost, and latency across pre-rank, rank, and re-rank stages.",
       "Choose pointwise, pairwise, or listwise objectives and evaluate top-of-list quality.",
-      "Explain exposure and position bias plus limits of inverse-propensity correction.",
+      "Explain exposure and position bias (ranking) plus limits of inverse-propensity correction.",
       "Apply eligibility, diversity, pacing, and safety constraints without hiding them inside labels.",
     ],
     concepts: [
       "multi-stage ranking",
       "learning to rank",
       "NDCG",
-      "position bias",
+      "position bias (ranking)",
       "propensity score",
       "counterfactual evaluation",
       "re-ranking",
@@ -766,7 +943,7 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Spend compute only as the candidate set shrinks.",
         points: [
-          "Pre-rank thousands with cheap features, rank hundreds with richer cross features, and re-rank tens for slate-level constraints; track recall loss after every stage.",
+          "Pre-rank 2,000 candidates with cheap features, rank the surviving 100 with rich cross features at roughly 0.4 ms each against a 40 ms stage budget, then re-rank the final 20 under slate constraints. Track how many relevant items each cut discards, because that number is the real cost of the cascade.",
           "Give each stage a deadline and fallback. Cache item features, batch scoring, and shed expensive features before missing the response SLO.",
           "Train stage-aware models on the population they will score; a final ranker trained on random corpus items may not separate hard retrieved candidates.",
         ],
@@ -778,13 +955,13 @@ export const mlTopics: RawStudyTopic[] = [
         points: [
           "Pointwise losses estimate per-item outcomes, pairwise losses optimize relative order, and listwise losses approximate slate metrics; choose based on labels and serving complexity.",
           "Combine multi-objective scores only after normalizing semantics and studying Pareto tradeoffs; use hard filters for legal or safety eligibility rather than hoping a penalty is sufficient.",
-          "Apply diversity, freshness, creator caps, ad pacing, and inventory constraints in a re-ranker, then log both raw model order and policy-adjusted order.",
+          "Put the deterministic slate rules in a re-ranker that runs after scoring—at most two items per creator in a page of 20, one sponsored slot every fifth position, no two near-duplicate items adjacent—and log the raw model order beside the policy-adjusted order so you can tell which stage changed the result.",
         ],
       },
       {
-        title: "Position bias and counterfactual evidence",
+        title: "Position bias (ranking) and counterfactual evidence",
         summary:
-          "Clicks reflect relevance, exposure, presentation, and the previous policy.",
+          "Clicks reflect relevance, exposure, presentation, and the previous policy. Say position bias (ranking) explicitly, because the same phrase also names an unrelated artifact in LLM evaluation - position bias (judge ordering), where a pairwise judge favors whichever answer it reads first.",
         points: [
           "Only exposed items can be clicked, and higher positions attract more attention. Naively treating non-clicks as negatives teaches the model to reproduce prior placement.",
           "Estimate examination propensities with randomized swaps or another defensible exposure experiment; inverse propensity scoring weights outcomes by 1/propensity and needs clipping or self-normalization to control variance.",
@@ -828,6 +1005,11 @@ export const mlTopics: RawStudyTopic[] = [
         symptom: "Tail latency spikes and fallback frequency concentrates on large candidate sets.",
         mitigation: "Set stage deadlines, precompute stable features, batch calls, and degrade by a tested feature or model cascade.",
       },
+      {
+        mode: "The pre-ranker filters a population it was never trained on",
+        symptom: "Relevant-item survival falls sharply at the pre-rank cut even though the pre-ranker's own offline AUC looks healthy on a random sample.",
+        mitigation: "Distill the pre-ranker from the rank model's scores over actually retrieved candidates, and gate on stage recall rather than per-stage AUC.",
+      },
     ],
     interviewQuestions: [
       "Why not run the most accurate model over the whole corpus?",
@@ -851,31 +1033,55 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "Why is a non-clicked item not automatically a clean negative?",
         options: [
-          "It may not have been examined because exposure and position affect clicks.",
-          "Clicks are always delayed by a month.",
-          "Non-clicks contain no item identifier.",
-          "Ranking models cannot consume binary labels.",
+          "Non-click rows omit the item identifier.",
+          "The item may never have been examined.",
+          "Clicks are always delayed by about a month.",
+          "Ranking losses cannot take binary labels.",
         ],
-        answerIndex: 0,
+        answerIndex: 1,
         explanation:
-          "Observed behavior is conditional on the logging policy and examination; an unseen or poorly placed item may be relevant.",
+          "Exposure and position determine whether an item could be clicked at all, so a non-click confounds irrelevance with never being seen. Treating non-clicks as clean negatives is exactly what teaches the ranker to reproduce the incumbent's ordering.",
       },
       {
         prompt: "What is required for offline inverse-propensity evaluation of a new policy?",
         options: [
-          "Every action the new policy may choose had nonzero probability under the logging policy.",
-          "The logging policy was fully deterministic.",
-          "All propensities equal zero.",
-          "The new policy uses the same model family.",
+          "Every action the new policy may take had support.",
+          "The logging policy was strictly deterministic there.",
+          "All logged propensities were equal to zero.",
+          "Both policies share the same model family.",
         ],
         answerIndex: 0,
         explanation:
-          "Support or overlap is essential; actions never exposed by the logger have no outcome evidence to reweight.",
+          "Inverse propensity scoring reweights logged outcomes, so any action the new policy might take needs nonzero probability under the logger; without overlap there is no evidence to reweight. Believing a deterministic logger is acceptable inverts the requirement, because determinism destroys the overlap the estimator needs.",
+      },
+      {
+        prompt: "Retrieval returns 2,000 candidates. The rank model costs 0.4 ms per item against a 40 ms stage budget. What does the module prescribe?",
+        options: [
+          "Score all 2,000 candidates with the rank model.",
+          "Cut retrieval to 100 candidates up front.",
+          "Pre-rank to about 100, then rank those.",
+          "Drop the re-rank stage and rank everything.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "Only 40 / 0.4 = 100 items fit the budget, so a cheap pre-rank narrows 2,000 to roughly that many and the expensive model scores the survivors while stage recall loss is tracked. Shrinking retrieval instead is the tempting shortcut, and it discards recall no later stage can recover.",
+      },
+      {
+        prompt: "Raw model NDCG improves but the shipped slate and the online metrics do not move. What does the module diagnose?",
+        options: [
+          "The pairwise loss should have been pointwise.",
+          "Position propensities were clipped too tightly.",
+          "Retrieval recall fell in the same release.",
+          "Re-ranker constraints undo the model's order.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Diversity, pacing, freshness, and safety rules applied after scoring can consume the entire relevance gain, which is why each stage is evaluated and both raw and policy-adjusted orders are logged. Blaming the loss function is the reflex answer and cannot explain a gain that exists in the raw order and vanishes in the slate.",
       },
     ],
     recallCards: [
-      { id: "mlrp-position-bias", prompt: "Explain position bias and why training naively on click logs degrades a ranker.", answer: "Users click what they are shown, and higher-ranked items receive more clicks regardless of relevance, so click logs reflect the previous ranker's exposure as much as user preference. Training directly on them teaches the model to reproduce the incumbent's ordering and creates a feedback loop that entrenches it, while starving unshown items of the data needed to prove they are good. Corrections include inverse-propensity weighting by estimated exposure, randomized or interleaved exploration slots, and position-aware models that treat rank as a feature at training and neutralize it at inference." },
-      { id: "mlrp-objective", prompt: "Describe why a ranker optimizing a single engagement metric is dangerous.", answer: "A single proxy such as click-through rate is optimized literally: the model learns clickbait, sensational content, and short-horizon engagement that harms retention and trust while the target metric improves. Production rankers therefore blend multiple objectives - predicted click, dwell or completion, explicit satisfaction, and negative feedback - with weights set by product judgment, and constrain the result with diversity, freshness, and safety requirements. Guardrail metrics that would detect the failure must be monitored alongside the objective, because the proxy improving is not evidence the product improved." },
+      { id: "mlrp-position-bias", prompt: "Explain position bias (ranking) and why training naively on click logs degrades a ranker.", answer: "Position bias (ranking) is the click-log confound - distinct from position bias (judge ordering), the ordering artifact in pairwise LLM judging. Users click what they are shown, and higher-ranked items receive more clicks regardless of relevance, so click logs reflect the previous ranker's exposure as much as user preference. Training directly on them teaches the model to reproduce the incumbent's ordering and creates a feedback loop that entrenches it, while starving unshown items of the data needed to prove they are good. Corrections include inverse-propensity weighting by estimated exposure, randomized or interleaved exploration slots, and position-aware models that treat rank as a feature at training and neutralize it at inference." },
+      { id: "mlrp-objective", prompt: "Describe why a ranker optimizing a single engagement metric is dangerous.", answer: "A single proxy such as click-through rate is optimized literally: the model learns clickbait, sensational content, and short-horizon engagement that harms retention and trust while the target metric improves. Production rankers therefore blend multiple objectives - predicted click, dwell or completion, explicit satisfaction, and negative feedback - with weights set by product judgment, and constrain the result with diversity, freshness, and safety requirements. Guardrail metrics - blocking release gates, not merely monitored metrics - must be defined for the harms the proxy hides, because the proxy improving is not evidence the product improved." },
     ],
   },
   {
@@ -884,12 +1090,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 3,
     tier: 2,
     title: "Make training reproducible and promotion evidence-based",
-    eyebrow: "Week 5 · Day 7",
+    eyebrow: "Promote on evidence, not weights",
     estimatedMinutes: 70,
     summary:
       "Build a training control plane that versions data, code, features, configuration, artifacts, evaluation reports, and promotion decisions from experiment to production.",
     whyItMatters:
-      "The trained weights are only one dependency. A senior design must reproduce why an artifact exists, prove it passed relevant gates, and roll it back with its compatible schema.",
+      "The weights are the smallest part of a model release. Reproducing a result six months later, or rolling one back at 3 a.m., needs the dataset snapshot, the transform version, the feature schema, the calibrator, the threshold, and the routing rule pinned together as one immutable bundle - which is why a rollback that restores only the weight file usually preserves the exact incompatibility that caused the incident.",
     objectives: [
       "Choose batch, incremental, or distributed training based on data and freshness requirements.",
       "Capture lineage for datasets, code, configuration, transforms, metrics, and artifacts.",
@@ -912,9 +1118,10 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "A run is reproducible when inputs and execution identity are immutable and discoverable.",
         points: [
-          "Record dataset manifest and snapshot, feature versions, label definition, split policy, code commit, dependency image, random seeds, hyperparameters, and hardware assumptions.",
+          "A run is identified by its inputs, not by the path it wrote to. Record the dataset snapshot id, the code commit, and the container image digest so that rerunning the manifest a year later resolves to the same bytes; the checklist below enumerates the rest of what has to be pinned. The test is blunt: rerun last quarter's manifest and diff the metrics.",
           "Make stages idempotent and content-address artifacts where practical; retries should not silently select newer source data.",
           "Use incremental training only when replay, optimizer state, and catastrophic-forgetting risks are understood; periodically compare against a clean full retrain.",
+          "Seeds and nondeterminism belong in the manifest too. Nondeterministic GPU kernels and a reshuffled data loader can move a headline metric by a few tenths of a point on their own, so train the same configuration three times, record the seed-to-seed spread, and treat any candidate whose margin over the champion is smaller than that spread as not yet a candidate.",
         ],
       },
       {
@@ -923,8 +1130,9 @@ export const mlTopics: RawStudyTopic[] = [
           "A candidate passes only if it beats the right baseline without breaking critical slices or operational limits.",
         points: [
           "Run temporal backtests and compare the candidate with the current champion on identical examples using paired uncertainty estimates.",
-          "Gate primary metrics, calibration, critical slices, fairness or safety checks, model size, feature availability, latency, and numerical stability.",
+          "A promotion gate is a conjunction, not a single number. A candidate that wins the primary metric but adds 15 ms to p99, or depends on a feature that is not yet materialized online, has not passed; express each gate as an explicit threshold against the champion measured on the same examples.",
           "Store the complete evaluation report and signed decision with the artifact; a single scalar metric is insufficient evidence for promotion.",
+          "Check that the evaluation set can even resolve the gate you wrote. If the paired difference in log loss carries a bootstrap standard error of 0.002, then a candidate 0.001 behind the champion has not failed and one 0.001 ahead has not passed; either widen the evaluation window until the interval is smaller than the decision, or lower the ambition of the gate and say so.",
         ],
       },
       {
@@ -932,7 +1140,7 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "The registry describes approved artifacts; the serving control plane moves traffic.",
         points: [
-          "Use explicit states such as registered, validated, approved, shadow, canary, production, and retired with authorization and audit history.",
+          "Model the registry as a state machine—registered, validated, approved, shadow, canary, production, retired—and require an authorized actor plus an audit record for every transition. The state records what evidence exists about an artifact, not where traffic is currently pointed.",
           "Bind model artifact, preprocessing graph, feature schema, threshold or policy version, and compatibility requirements into one deployable release.",
           "Keep the champion available while challengers shadow or receive bounded traffic; rollback restores the entire compatible release, not weights alone.",
         ],
@@ -956,6 +1164,12 @@ export const mlTopics: RawStudyTopic[] = [
         preferA: "Use one model when operational simplicity and shared data dominate.",
         preferB: "Use specialized models where populations and error costs materially differ.",
         watch: "Routing errors, sparse slice data, duplicated operations, and inconsistent calibration.",
+      },
+      {
+        decision: "One organization-wide registry or a registry per team",
+        preferA: "Run one registry when promotion policy, audit trail, and rollback tooling have to be identical across every model that touches the same surface.",
+        preferB: "Allow per-team registries when release cadence and risk profiles genuinely differ, provided each exports its promotion decisions to a shared audit log.",
+        watch: "Promotion criteria that quietly diverge, compatibility checks reimplemented four times, and a rollback runbook only one team has ever rehearsed.",
       },
     ],
     failureModes: [
@@ -997,26 +1211,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "Which set is closest to a reproducible model release?",
         options: [
-          "Weights and final accuracy only",
-          "Weights, immutable data and code identity, transforms, feature schema, configuration, evaluation, and policy version",
-          "The latest training table and a model name",
-          "A container tag that always points to latest",
+          "Weights plus the headline accuracy number",
+          "The newest training table and a model name",
+          "Data, code, transforms, config, and policy ids",
+          "A container tag that always points at latest",
         ],
-        answerIndex: 1,
+        answerIndex: 2,
         explanation:
-          "Reproduction and rollback require immutable identities for all data and execution dependencies plus the decision policy.",
+          "Reproduction and rollback need immutable identities for data, code, environment, transforms, feature schema, thresholds, and policy version; the weights are one dependency among many. Recording weights and a metric is the common shortcut, and it cannot say why the artifact exists or what to restore.",
       },
       {
         prompt: "Why compare a challenger and champion on paired evaluation examples?",
         options: [
-          "It removes all production risk.",
-          "It reduces variance in their performance difference and isolates per-example changes.",
-          "It guarantees fairness.",
-          "It avoids temporal validation.",
+          "It removes every production risk from promotion.",
+          "It cuts variance in the champion-challenger delta.",
+          "It guarantees the candidate is fair by group.",
+          "It replaces the need for temporal validation.",
         ],
         answerIndex: 1,
         explanation:
-          "Paired comparisons exploit shared examples, yielding a more sensitive and interpretable estimate of the delta.",
+          "Scoring both models on identical examples cancels example difficulty, so the paired difference has far lower variance and per-example regressions become visible. Treating the comparison as a fairness or risk guarantee confuses a sensitivity technique with a gate; slices, calibration, and operational checks are still required.",
+      },
+      {
+        prompt: "When does the module say incremental training is riskier than a full retrain?",
+        options: [
+          "When replay and forgetting risks are unexamined.",
+          "Whenever the training data outgrows a single node.",
+          "When the freshness target is stated in hours.",
+          "When champion and challenger share features.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "Incremental updates inherit optimizer state and can quietly forget history or mishandle corrections, so they are allowed only when those risks are understood and checked periodically against a clean full retrain. Assuming data size alone forces incremental training is the misread: scale argues for it but does not make it safe.",
+      },
+      {
+        prompt: "A model rollback completes and the service still behaves badly. What does the module identify as the cause?",
+        options: [
+          "The bake window before rollback was too short.",
+          "The registry state machine skipped an approval.",
+          "The champion was never content-addressed.",
+          "Thresholds and transforms did not roll back.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "A release is the model plus preprocessing graph, feature schema, calibrator, threshold, and routing policy, so restoring weights alone leaves the incompatible pieces in production. Treating the model as just a weight file is precisely the misconception this failure mode corrects.",
       },
     ],
     recallCards: [
@@ -1030,12 +1268,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 4,
     tier: 2,
     title: "Handle imbalance, calibration, and decision thresholds",
-    eyebrow: "Week 6 · Day 1",
+    eyebrow: "Calibrated probability, then policy",
     estimatedMinutes: 75,
     summary:
       "Train on rare outcomes without corrupting probability semantics, calibrate on representative data, and choose policy thresholds from costs, capacity, and slice constraints.",
     whyItMatters:
-      "High-stakes systems consume probabilities as decisions. A model can rank cases correctly yet systematically overstate risk, overwhelm reviewers, or harm a critical cohort.",
+      "Downsample negatives twenty to one and ROC-AUC will not budge, which is exactly why the damage is easy to miss: every predicted probability is now inflated by about a factor of twenty in odds terms, and a threshold tuned against those numbers fires far too often at a 0.5% serving base rate. Ranking survived; probability semantics did not. Calibrate on held-out data drawn at the deployment prevalence, then choose the threshold from costs and review capacity rather than from the score distribution.",
     objectives: [
       "Distinguish discrimination, calibration, and thresholded decision quality.",
       "Correct probability interpretation after class-weighting or negative downsampling.",
@@ -1058,9 +1296,10 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Sampling can improve learning efficiency, but evaluation must represent production prevalence.",
         points: [
-          "Downsample abundant negatives or use weighted losses for optimization, while preserving example weights and an untouched validation set with the deployment base rate.",
+          "Downsample abundant negatives or use weighted losses for optimization, while preserving example weights and an untouched validation set at the deployment base rate. At 0.5% prevalence, keeping one negative in twenty turns 200 million rows into roughly 11 million without discarding a single positive.",
           "PR-AUC and precision at capacity reveal useful rare-event performance; ROC-AUC alone can hide an intolerable absolute false-positive count.",
           "If training prevalence differs from serving prevalence, raw logits generally do not represent serving probabilities; correct prior shift only when class-conditional distributions are plausibly stable.",
+          "Count positives rather than rows when judging whether there is enough data. Two hundred million rows at 0.5% prevalence carry a million positives, which is ample; the same prevalence over 400,000 rows carries 2,000, and no sampling scheme invents information those 2,000 examples do not already hold.",
         ],
       },
       {
@@ -1078,8 +1317,8 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Threshold selection converts probabilities into actions under asymmetric costs and finite capacity.",
         points: [
-          "For calibrated binary risk and constant costs, act when expected benefit exceeds expected cost; then simulate review capacity, intervention effects, and abstention.",
-          "Choose thresholds on validation data, freeze them into the release, and report precision, recall, workload, expected cost, and critical-slice behavior.",
+          "For calibrated binary risk and constant costs, act when expected benefit exceeds expected cost. At C_FP = 10 and C_FN = 90 that cut sits at 0.10, but if only 2,000 of the 12,000 daily cases above 0.10 can be reviewed, capacity rather than the cost matrix sets the threshold you actually ship.",
+          "Choose the threshold on validation data and freeze it into the release manifest next to the calibrator it depends on. Publish what it implies operationally—alerts per day, precision and recall at that cut, expected cost, behavior on the critical slices—so the number can be argued about by people who do not read the code.",
           "Monitor score distributions and action rates because prevalence or calibration drift can change workload even when ranking AUC is stable.",
         ],
       },
@@ -1120,6 +1359,11 @@ export const mlTopics: RawStudyTopic[] = [
         symptom: "Overall reliability looks good while a critical cohort is consistently over- or under-scored.",
         mitigation: "Report slice reliability with uncertainty and repair data, model, or policy where support is sufficient.",
       },
+      {
+        mode: "The calibrator is refitted but the threshold is left where it was",
+        symptom: "Alert volume jumps or collapses after a routine recalibration even though the model weights and the incoming traffic are unchanged.",
+        mitigation: "Version calibrator and threshold as a single object and re-derive the cut from costs and review capacity every time the calibrator moves, since the same 0.10 means something different on a rescaled probability.",
+      },
     ],
     interviewQuestions: [
       "Can a model be well ranked but poorly calibrated?",
@@ -1143,26 +1387,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "A model has excellent ROC-AUC but predicted 0.8 events occur only 40% of the time. What is true?",
         options: [
-          "It is discriminative but miscalibrated.",
-          "It is calibrated but cannot rank.",
-          "ROC-AUC proves the probabilities are correct.",
-          "The threshold must always be 0.5.",
+          "It ranks well but its probabilities are wrong.",
+          "It is calibrated but it cannot separate classes.",
+          "A strong ROC-AUC proves the probabilities.",
+          "The threshold must be left at 0.5 here.",
         ],
         answerIndex: 0,
         explanation:
-          "Ranking quality and probability calibration are distinct; AUC does not require scores to equal event frequencies.",
+          "AUC depends only on score order, so a model can rank perfectly while calling 40% events 0.8: discrimination and calibration are independent properties. Reading AUC as evidence that probabilities are trustworthy is the error that breaks every expected-cost threshold downstream.",
       },
       {
         prompt: "Where should a calibrator be fit?",
         options: [
-          "On the same rows used to minimize the base model loss",
-          "On representative held-out data after model fitting and selection",
-          "Only on production positives",
-          "On a dataset with unknown sampling and no weights",
+          "On the rows used to minimize training loss",
+          "On held-out data at the serving prevalence",
+          "On the production positives collected so far",
+          "On any sample whose weights are unrecorded",
         ],
         answerIndex: 1,
         explanation:
-          "A separate representative set estimates out-of-sample score-to-probability mapping without fitting to training errors.",
+          "A calibrator maps scores to probabilities out of sample, so it is fit after model selection on held-out data drawn at the deployment base rate. Fitting on the training rows learns the model's overconfidence instead of correcting it, because those scores are already optimized against those labels.",
+      },
+      {
+        prompt: "Negatives are downsampled to one in twenty for training and raw scores ship unchanged. Serving prevalence is 0.5%. What follows?",
+        options: [
+          "Ranking collapses while its calibration survives.",
+          "Recall drops but precision stays unchanged.",
+          "Nothing: sampling cannot move any score.",
+          "Predicted risk inflates and workload explodes.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Keeping one negative in twenty multiplies the positive odds by about twenty, so raw scores describe the sampled prevalence rather than the 0.5% actually served and every fixed threshold fires far too often. Assuming sampling is harmless because AUC held is the trap: ranking survives, probability semantics do not.",
+      },
+      {
+        prompt: "Aggregate reliability looks excellent, yet one cohort is consistently over-scored. What does the module prescribe?",
+        options: [
+          "Lower the global threshold until the cohort balances.",
+          "Refit one calibrator per cohort regardless.",
+          "Report slice reliability, then repair the gap.",
+          "Ignore it: global fit implies slice fit.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "Averaging cancels opposite errors, so reliability is reported per predeclared slice with support and uncertainty before data, model, or policy is repaired. Recalibrating every cohort regardless of support is the overcorrection the module warns about, since thin slices yield noisy calibrators plus new routing and fairness risk.",
       },
     ],
     recallCards: [
@@ -1182,12 +1450,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 5,
     tier: 2,
     title: "Reason about delayed labels and high-stakes decisions",
-    eyebrow: "Week 6 · Day 2",
+    eyebrow: "Missing is not negative",
     estimatedMinutes: 75,
     summary:
       "Operate when ground truth arrives late, is selectively observed, or is changed by intervention, while preserving auditability and safe human escalation.",
     whyItMatters:
-      "Fraud, credit, and safety outcomes mature slowly and may be unknowable for rejected cases. Treating missing outcomes as negatives creates biased models and misleading monitoring.",
+      "Credit, fraud, and safety systems make decisions whose outcomes arrive 30 to 90 days later, if they arrive at all. A declined applicant never repays and never defaults, so the labeled data describes only the population the previous policy chose to approve, and waiting longer does nothing whatsoever to fix that. This module is about operating - training, monitoring, escalating, and auditing - when outcomes are late, selectively observed, and altered by the intervention itself.",
     objectives: [
       "Model label maturity, right censoring, late corrections, and training cutoffs.",
       "Distinguish delayed feedback from selective labels and intervention effects.",
@@ -1210,7 +1478,7 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "A missing outcome before its observation window closes is unknown, not negative.",
         points: [
-          "Store decision_at, outcome_at, mature_at, observed_at, and label_status; train conventional classifiers only on cohorts whose full horizon has elapsed.",
+          "Store decision_at, outcome_at, mature_at, observed_at, and label_status, and train conventional classifiers only on cohorts whose full horizon has elapsed. With a 90-day window that means today's decisions become training data in three months, not tomorrow.",
           "When freshness matters, model time-to-event with censoring-aware survival objectives or estimate delayed conversion, then backtest assumptions against eventually mature cohorts.",
           "Late disputes and reversals are versioned label corrections. Never mutate an evaluation snapshot without preserving its prior state and provenance.",
         ],
@@ -1230,8 +1498,8 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Deploy a decision system with explicit uncertainty, review, reason codes, and recovery.",
         points: [
-          "Define auto-allow, review, auto-block or decline bands using calibrated risk, costs, capacity, uncertainty, and legal or safety constraints.",
-          "Use deterministic eligibility and policy checks around the model; provide stable reason codes and preserve input, feature, model, threshold, action, and override versions.",
+          "Cut the calibrated risk scale into bands with an action attached to each: auto-allow below 0.02, human review between 0.02 and 0.15, auto-decline above 0.15. Set those boundaries from costs, review capacity, and legal constraints rather than from round numbers, and re-derive them whenever the calibrator changes.",
+          "Wrap the model in deterministic eligibility checks and emit a stable reason code with every adverse action, because the affected person is entitled to a reason and a support agent needs one that does not change meaning between releases. Write the decision record once and never mutate it; the checklist below lists what that record has to carry.",
           "Monitor immediate process indicators separately from mature outcomes, with cohort backfills that revise dashboards once labels arrive.",
         ],
       },
@@ -1254,6 +1522,12 @@ export const mlTopics: RawStudyTopic[] = [
         preferA: "Explore within approved low-risk bands to reduce selective-label bias.",
         preferB: "Remain conservative when an adverse action is irreversible or exploration is unethical.",
         watch: "Insufficient overlap, hidden harm, and invalid causal extrapolation beyond explored regions.",
+      },
+      {
+        decision: "Derive reason codes from the model or from the policy layer",
+        preferA: "Derive them from the model when attributions are stable enough to survive a retrain and can be checked against the score they claim to explain.",
+        preferB: "Derive them from deterministic policy rules when identical inputs must produce an identical explanation across releases and reviewers.",
+        watch: "Post-hoc attributions that reshuffle after every retrain, and reason codes naming features the applicant has no way to change.",
       },
     ],
     failureModes: [
@@ -1295,21 +1569,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "Why are declined credit applications a selective-label problem?",
         options: [
-          "Their requested amounts are always missing.",
-          "The repayment outcome is generally observed only if credit was granted under the prior policy.",
-          "All declines are known defaults.",
-          "Calibration cannot be applied to scores.",
+          "Repayment is seen only where credit was granted.",
+          "The requested loan amounts are missing on declines.",
+          "Every declined applicant is a known default.",
+          "Declined scores can never be calibrated.",
         ],
-        answerIndex: 1,
+        answerIndex: 0,
         explanation:
-          "The previous action controls outcome observation, so labeled approved cases are a selected population rather than all applicants.",
+          "The prior policy decides who gets an observable outcome, so the labeled set covers approved applicants and is a selected population rather than all applicants. Treating declines as defaults invents labels the system was never able to observe.",
       },
       {
         prompt: "What is the correct status for a 30-day-old case whose label requires a 90-day outcome window?",
-        options: ["Negative", "Positive", "Censored or immature", "Randomly assigned"],
+        options: [
+          "Negative, since nothing has happened yet",
+          "Positive, pending a later reversal",
+          "Censored: the window is still open",
+          "Randomly assigned to keep balance",
+        ],
         answerIndex: 2,
         explanation:
-          "The outcome window is incomplete, so absence of an event is not yet evidence of a negative.",
+          "Two-thirds of the observation window remains, so the absence of an event is unknown rather than negative. Marking immature rows negative is what makes recent cohorts look artificially safe and makes calibration shift with row age.",
+      },
+      {
+        prompt: "A team proposes waiting a full year so every credit label matures. Why does that not solve selective labels?",
+        options: [
+          "A year of waiting outruns any stable window.",
+          "Declined applicants never produce an outcome.",
+          "Survival models require censoring to remain.",
+          "Reviewer rubrics change over that horizon.",
+        ],
+        answerIndex: 1,
+        explanation:
+          "Maturity cures delay, not selection: declined applicants generate no repayment outcome however long anyone waits, so bounded exploration, randomized boundary review, or partial-identification bounds are required. Confusing delayed feedback with selective labels is the exact error, since only the first is fixed by patience.",
+      },
+      {
+        prompt: "Label agreement drops on busy days and the model starts predicting reviewer identity well. What is happening?",
+        options: [
+          "Concept drift is changing P(Y|X) in the queue.",
+          "The calibration set is now too small to fit.",
+          "Right censoring truncates the busy cohorts.",
+          "The model is learning reviewer queue artifacts.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Human labels vary with rubric, adjudication, and queue pressure, so a model trained on them can fit the review process instead of the underlying truth; blind overlap, adjudication, and reviewer-aware audits are the mitigation. Reading it as concept drift sends the team to retrain on the same contaminated labels.",
       },
     ],
     recallCards: [
@@ -1323,17 +1626,17 @@ export const mlTopics: RawStudyTopic[] = [
     day: 1,
     tier: 2,
     title: "Run trustworthy online experiments",
-    eyebrow: "Week 6 · Day 3",
+    eyebrow: "Validate assignment before lift",
     estimatedMinutes: 75,
     summary:
       "Design assignment, exposure, power, analysis, and guardrails that identify product impact despite sample-ratio mismatch, interference, novelty, and repeated peeking.",
     whyItMatters:
-      "An experiment is a distributed measurement system, not a dashboard toggle. Assignment bugs or cross-unit effects can make precise-looking results causally meaningless.",
+      "An experiment is a distributed measurement system with a hash function, an eligibility filter, a logging pipeline, and a statistical contract, and any of the four can break while the dashboard keeps rendering a confident number. A 52/48 split on a planned 50/50 allocation is not a rounding artifact: it says the arms differ by something other than the treatment, and every lift on that page is uninterpretable until the cause is found.",
     objectives: [
       "Choose the randomization unit and exposure rule from the causal mechanism.",
       "Estimate detectable effects, duration, and guardrails before launch.",
       "Detect sample-ratio mismatch and instrumentation failures early.",
-      "Reason about interference, position bias, novelty, and sequential decisions.",
+      "Reason about interference, position bias (ranking), novelty, and sequential decisions.",
     ],
     concepts: [
       "randomization unit",
@@ -1354,6 +1657,7 @@ export const mlTopics: RawStudyTopic[] = [
           "Hash an immutable unit identifier with experiment and salt into mutually exclusive buckets; persist allocation metadata and exclude neither arm based on post-assignment behavior.",
           "Choose user, session, request, seller, or geographic cluster according to carryover and interaction. Analyze at the unit of randomization or use cluster-robust uncertainty.",
           "Log assignment separately from qualified exposure. Intention-to-treat uses all assigned units; triggered analysis is valid only with a pre-treatment trigger applied symmetrically.",
+          "Namespace experiments so two tests on the same surface cannot collide in the same hash. Salt the bucketing with the experiment id, and either place interacting tests in mutually exclusive layers or accept that what you are measuring is their interaction.",
         ],
       },
       {
@@ -1361,7 +1665,7 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Precommit the hypothesis, primary metric, MDE, duration, and stopping rule.",
         points: [
-          "Estimate sample size from baseline variance, alpha, desired power, allocation, clustering, and minimum detectable effect; run through full business cycles.",
+          "Work the sample size backwards from the smallest effect you would actually act on. Detecting a 2% relative lift on a 5% conversion baseline at 80% power and alpha 0.05 needs on the order of 800,000 units per arm, and cluster randomization inflates that by the design effect; round the resulting duration up to whole business cycles so weekday mix cannot masquerade as treatment.",
           "Use one primary metric plus guardrails and predeclared slices. Variance reduction can improve sensitivity, but features used for adjustment must be pre-treatment.",
           "Repeated peeking inflates false positives under fixed-horizon tests; use a fixed horizon or a valid group-sequential or always-valid procedure.",
         ],
@@ -1371,9 +1675,9 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Validate the experiment before interpreting uplift.",
         points: [
-          "Sample-ratio mismatch compares observed arm counts with expected allocation, commonly through a chi-square test; investigate assignment, eligibility, bots, logging, and missing events rather than correcting the p-value away.",
+          "Test the observed arm counts against the planned allocation with a chi-square before reading any outcome. On a planned 50/50, 520,000 against 480,000 is nowhere near chance, and it means something upstream—bucketing, an eligibility filter, bot removal, or differential logging—is selecting who enters the experiment. Fix that cause; reweighting the arms only hides it.",
           "Interference violates independent-unit assumptions when one user's treatment changes another's inventory, price, network, or creator outcomes; randomize clusters or model marketplace-wide effects.",
-          "For rankers, interleaving can sensitively compare preferences in one slate, while long experiments reveal novelty, learning, fatigue, and ecosystem effects.",
+          "For rankers, interleaving mixes both orderings into one slate and asks the same user to choose, which removes between-user variance and can settle a preference question with roughly a tenth of the traffic an A/B test would need. It buys that sensitivity by answering a narrower question: only a long-running experiment shows whether the winner survives novelty wearing off, habits forming, or creators changing what they post.",
         ],
       },
     ],
@@ -1413,6 +1717,11 @@ export const mlTopics: RawStudyTopic[] = [
         symptom: "Reported wins fail to replicate and experiment durations vary with noisy early effects.",
         mitigation: "Precommit a fixed horizon or use a valid sequential test with explicit spending and stopping rules.",
       },
+      {
+        mode: "A novelty spike is read as durable lift",
+        symptom: "The treatment effect is largest in the first days of exposure and decays toward zero as the experiment runs.",
+        mitigation: "Run through at least two full business cycles, plot the effect by days since first exposure, and read the estimate from the stabilized period rather than the launch week.",
+      },
     ],
     interviewQuestions: [
       "What is the randomization unit, and where can treatment spill into control?",
@@ -1436,26 +1745,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "An experiment planned 50/50 has 520,000 treatment and 480,000 control assignments. What should happen first?",
         options: [
-          "Interpret conversion lift.",
+          "Read out the conversion lift per arm.",
           "Reweight the smaller arm and continue.",
-          "Run an SRM test and investigate assignment or logging before outcome analysis.",
-          "Delete enough treatment rows to balance counts.",
+          "Run an SRM test before outcome analysis.",
+          "Drop treatment rows until counts match.",
         ],
         answerIndex: 2,
         explanation:
-          "A large allocation discrepancy can signal broken randomization or measurement; causal interpretation should pause until explained.",
+          "A 52/48 split over a million units is far outside chance, so assignment, eligibility, bot filtering, or logging is broken and any lift is confounded. Reweighting is the tempting repair and it is wrong: the defect is in who entered the experiment, not in the arithmetic.",
       },
       {
         prompt: "Why might seller-level randomization be better than buyer-level randomization for a marketplace ranking change?",
         options: [
-          "It always needs fewer samples.",
-          "Treatment may alter shared seller inventory or outcomes, causing interference across buyers.",
-          "It removes novelty effects.",
-          "It guarantees equal revenue.",
+          "Cluster assignment absorbs spillover via sellers.",
+          "Seller clusters always require a far smaller sample.",
+          "Randomizing sellers removes novelty effects.",
+          "It equalizes revenue across the two arms.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "Treated buyers change shared seller inventory and behavior that control buyers then encounter, so randomizing the seller puts the interference inside a cluster. Expecting cluster designs to need fewer samples is backwards: clustering costs power, and that cost is what buys an unbiased estimate.",
+      },
+      {
+        prompt: "A team checks a fixed-horizon test daily for two weeks and stops the first time p falls below 0.05. What is the consequence?",
+        options: [
+          "Power rises because data is used sooner.",
+          "The estimate stays unbiased, intervals widen.",
+          "Only guardrail metrics become unreliable.",
+          "The false-positive rate far exceeds 5%.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Fourteen looks at the same accumulating data give noise fourteen chances to cross the line, so realized alpha is several times the nominal 5% and reported wins fail to replicate. Believing early stopping merely saves time is the misconception; valid early stopping needs a group-sequential or always-valid procedure planned in advance.",
+      },
+      {
+        prompt: "Only 8% of assigned users ever reach the changed surface. Which analysis stays valid?",
+        options: [
+          "Drop unexposed users from the treatment arm.",
+          "Trigger on a pre-treatment rule, symmetrically.",
+          "Compare exposed treatment with all controls.",
+          "Re-randomize the exposed users into new arms.",
         ],
         answerIndex: 1,
         explanation:
-          "Cluster assignment can contain spillovers when treated demand changes a shared supplier's state seen by control buyers.",
+          "Assignment is random but exposure happens after treatment, so the only valid narrowing is a trigger defined before treatment and applied identically to both arms; otherwise intention-to-treat over all assigned units is the estimand. Filtering only the treatment arm on observed exposure is the post-assignment selection bug that destroys comparability.",
       },
     ],
     recallCards: [
@@ -1469,15 +1802,15 @@ export const mlTopics: RawStudyTopic[] = [
     day: 2,
     tier: 2,
     title: "Deploy through shadow, canary, and rollback stages",
-    eyebrow: "Week 6 · Day 4",
+    eyebrow: "Earn traffic in stages",
     estimatedMinutes: 65,
     summary:
       "Promote a complete model release through replay, shadow, canary, and ramp stages with compatibility checks, capacity protection, and automatic rollback.",
     whyItMatters:
-      "Offline success cannot reveal live feature skew, dependency failures, latency tails, or action-side harm. Progressive delivery limits blast radius while producing production evidence.",
+      "Shadow traffic proves the new release can execute - features resolve, p99 holds, memory fits - and proves absolutely nothing about whether users end up better off, which is the entire reason canary cohorts, bake windows, and a rehearsed rollback path exist downstream of it.",
     objectives: [
       "Explain what shadow traffic can and cannot validate.",
-      "Design canary routing, guardrail gates, bake windows, and automatic rollback.",
+      "Design canary routing, blocking guardrail metrics, bake windows, and automatic rollback.",
       "Version the model, features, calibration, thresholds, and policy as a release.",
       "Protect serving with fallbacks, load testing, autoscaling, and kill switches.",
     ],
@@ -1497,9 +1830,9 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "A shadow receives copied requests but does not determine the user-visible action.",
         points: [
-          "Mirror representative requests asynchronously, pin both release identities, and compare feature availability, prediction distributions, disagreement, latency, errors, and resource use.",
+          "Mirror a representative sample of live requests asynchronously with both release identities pinned, then compare the two on the questions a shadow can actually answer: does every feature resolve, how far apart are the score distributions, how often do champion and candidate choose different actions, and do p99 latency and memory still fit the box.",
           "Shadowing validates execution and observational deltas but cannot measure treatment outcomes because users still experience the champion's action.",
-          "Prevent shadow side effects: disable writes, notifications, charges, queue mutations, and feedback events; isolate capacity so shadows cannot harm production.",
+          "Run the shadow under credentials that cannot write anything. Stubbing side effects one at a time is how a charge or a push notification eventually escapes; revoking the write path outright makes the mistake unavailable, and a separate capacity pool stops a slow shadow from stealing threads from the request it was copied from.",
         ],
       },
       {
@@ -1508,7 +1841,7 @@ export const mlTopics: RawStudyTopic[] = [
           "A canary exposes a small stable cohort to the new decision and expands only after evidence and bake time.",
         points: [
           "Route by deterministic user or entity hash where carryover matters; begin with internal or low-risk cohorts, then ramp 1%, 5%, 25%, 50%, and 100% only as gates pass.",
-          "Gate errors, p95 and p99 latency, feature misses, score and action rates, immediate safety signals, business guardrails, and capacity headroom.",
+          "Attach a numeric gate to each ramp step instead of eyeballing a dashboard: error rate within 10% of champion, p99 inside its SLO, feature-miss and fallback rates flat, action rate inside a predeclared band, and no safety signal above zero. A gate nobody wrote down is a gate nobody enforces at 2 a.m.",
           "Use minimum sample and bake windows. Fast operational metrics can stop a release early, while delayed product outcomes may require holding at a safe percentage.",
         ],
       },
@@ -1517,9 +1850,18 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Rollback must restore a known-compatible release quickly and predictably.",
         points: [
-          "Keep the previous artifact, feature schema, calibrator, threshold, routing rule, and dependency configuration warm and addressable.",
-          "Automate rollback on hard guardrails with hysteresis to avoid flapping; retain a manual kill switch and audit who invoked it.",
+          "Rollback speed is decided long before the incident. Keep the whole previous release - artifact, feature schema, calibrator, threshold, and routing rule - loaded and addressable behind a pointer, so restoring it is a pointer flip taking seconds rather than a container pull and a cold model load taking minutes while the graph keeps falling.",
+          "Automate rollback on hard guardrail metrics with hysteresis to avoid flapping; retain a manual kill switch and audit who invoked it.",
           "Forward-only data writes may make binary rollback unsafe, so use backward-compatible schemas, dual reads, or isolate model decisions from irreversible side effects.",
+        ],
+      },
+      {
+        title: "Capacity rehearsal before exposure",
+        summary:
+          "A release that is correct and 50 percent more expensive fails at the first traffic peak, not in the canary.",
+        points: [
+          "Load-test at the peak QPS the surface really sees, with the candidate-set sizes production really produces. A ranker whose per-item cost drifts from 0.4 ms to 0.6 ms quietly cuts the number of items that fit a 40 ms stage budget from 100 to 66, and that loss surfaces as missing recall rather than as a latency alert.",
+          "Rehearse dependency failure before the ramp instead of during it: take the online feature store away in a staging replay and confirm the release follows its documented default path rather than holding the request thread until the deadline expires.",
         ],
       },
     ],
@@ -1582,26 +1924,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "Which claim can a shadow deployment support?",
         options: [
-          "The new policy causally improves retention.",
-          "The candidate meets live feature, latency, prediction, and capacity expectations without controlling user actions.",
-          "Users prefer the new ranking.",
-          "The treatment has no marketplace interference.",
+          "That the new policy causally lifts retention.",
+          "That live features, latency, and capacity hold.",
+          "That users prefer the new ranking order.",
+          "That treatment causes no marketplace spillover.",
         ],
         answerIndex: 1,
         explanation:
-          "A shadow validates live execution and observational comparisons; it does not deliver treatment, so it cannot estimate causal product effects.",
+          "A shadow executes on mirrored traffic without owning the action, so it proves feature availability, latency, prediction deltas, and resource fit, and nothing about user response. Expecting a shadow to show causal lift is the error, because users still receive the champion's decision throughout.",
       },
       {
         prompt: "What should a robust rollback restore?",
         options: [
-          "Only the weight file",
-          "Only the decision threshold",
-          "A known-compatible model, transforms, feature schema, calibration, threshold, and routing policy",
-          "The oldest available container",
+          "Only the previous weight file, kept warm",
+          "Only the decision threshold and its version",
+          "The compatible release: model through policy",
+          "The oldest container image in the registry",
         ],
         answerIndex: 2,
         explanation:
-          "The serving contract spans the complete release, and partial rollback can preserve the incompatibility that caused failure.",
+          "The serving contract spans model, transforms, feature schema, calibration, threshold, and routing, and all of them must return together to a known-compatible state. Rolling back weights alone usually preserves the very incompatibility that caused the incident.",
+      },
+      {
+        prompt: "During shadow validation, users start receiving duplicate notifications. What went wrong?",
+        options: [
+          "The shadow was allowed to perform writes.",
+          "The canary ramp passed its bake window.",
+          "Shadow and champion shared a cache key.",
+          "The mirrored traffic was unrepresentative.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "A shadow must be read-only: writes, notifications, charges, queue mutations, and feedback events are stubbed and its capacity isolated, or validation becomes the incident. Assuming a shadow is harmless because it does not serve the response is the misconception, since not serving is not the same as not acting.",
+      },
+      {
+        prompt: "The primary outcome for a release matures in seven days. What does the module recommend for the ramp?",
+        options: [
+          "Ramp straight to 100% once error gates pass.",
+          "Skip the canary and shadow for seven days.",
+          "Automate rollback on the delayed outcome.",
+          "Hold at a safe percentage until it matures.",
+        ],
+        answerIndex: 3,
+        explanation:
+          "Fast operational metrics can stop a release early but cannot clear it, so the ramp holds at a bounded percentage through a bake window until the delayed outcome arrives. Treating green latency and error gates as sufficient for full traffic is the shortcut staged delivery exists to prevent.",
       },
     ],
     recallCards: [
@@ -1615,12 +1981,12 @@ export const mlTopics: RawStudyTopic[] = [
     day: 3,
     tier: 2,
     title: "Monitor drift, feedback loops, and model health",
-    eyebrow: "Week 6 · Day 5",
+    eyebrow: "Drift diagnoses, labels decide",
     estimatedMinutes: 80,
     summary:
       "Observe data, features, predictions, decisions, outcomes, slices, latency, and cost while distinguishing drift signals from evidence that retraining will improve the system.",
     whyItMatters:
-      "Production ML changes the data it later learns from. Without lineage-aware monitoring, teams either miss real degradation or automatically retrain on a corrupted feedback loop.",
+      "A recommender that learns from its own exposure logs earns a better offline replay score every quarter while surfacing fewer distinct items every quarter, and no feature-distribution alarm fires, because the inputs never stopped looking normal. The signal that would catch it lives in the join between predictions and matured outcomes, dimensioned by prediction cohort and release - which under a 90-day label window means the trustworthy number about today's model arrives a quarter from now, and everything before it is a leading proxy that has to be labeled as one.",
     objectives: [
       "Distinguish data drift, concept drift, calibration drift, skew, and data-quality failure.",
       "Design monitoring for immediate signals and delayed mature outcomes.",
@@ -1643,9 +2009,10 @@ export const mlTopics: RawStudyTopic[] = [
         summary:
           "Monitor the chain from source data to user outcome with release and slice dimensions.",
         points: [
-          "Data layer: schema, volume, nulls, ranges, categorical novelty, event lag, feature age, online/offline parity, and training-serving distribution distance.",
-          "Serving layer: request rate, errors, timeouts, p50/p95/p99 latency, cache hits, default rates, resource saturation, model version, score distribution, action rate, and fallback rate.",
-          "Outcome layer: mature precision, recall, calibration, utility, safety and fairness guardrails by cohort, decision date, and release with uncertainty and label coverage.",
+          "The data layer answers one question: are the inputs still arriving intact? It watches whether the schema still matches, whether today's row count sits inside its usual band, whether any column's null rate has moved, and how old the newest event is against its freshness SLA. A p99 feature age of 40 minutes against a 15-minute SLA is a data-layer failure, and no model metric will ever name it.",
+          "The serving layer answers whether the deployed release behaves like the one that was tested. Read the score distribution and the action rate beside the ordinary request rate, errors, and p99, because a release can hold every latency target while quietly doubling the share of traffic it routes to human review.",
+          "The outcome layer answers whether the decisions were any good, and it is the only layer that can. It reports matured precision, recall, and calibration by prediction cohort and release, and it carries label coverage alongside every number, so a metric computed over 40% of a cohort is never read as though it described the whole cohort.",
+          "Dimension all three layers by release rather than by wall clock. A metric plotted against time alone blends the outgoing and incoming releases throughout every ramp, which is precisely the window in which a regression is cheapest to catch and easiest to attribute.",
         ],
       },
       {
@@ -1654,7 +2021,7 @@ export const mlTopics: RawStudyTopic[] = [
           "Distribution change is a clue; degradation requires labels or a defensible task-specific proxy.",
         points: [
           "Covariate drift means P(X) changes; concept drift means P(Y|X) changes; prior shift means P(Y) changes. They imply different repairs and can occur independently.",
-          "Use PSI, KS, Jensen-Shannon divergence, missingness, or embedding summaries as diagnostics with reference windows and slice context, not universal retrain thresholds.",
+          "Reach for PSI, a KS statistic, or Jensen-Shannon divergence as a diagnostic attached to a named reference window, and read it against the same week a year earlier where seasonality is real. None of them says the model got worse: a PSI of 0.3 on a feature the model barely weights is noise, while 0.05 on the feature carrying most of the signal can be a genuine regression.",
           "When labels mature late, monitor leading process signals now and backfill outcome dashboards by prediction cohort; compare the same maturity age across releases.",
         ],
       },
@@ -1664,8 +2031,8 @@ export const mlTopics: RawStudyTopic[] = [
           "Predictions influence exposure, labels, and future training data.",
         points: [
           "A recommender exposes popular items, collects more interactions for them, then treats exposure-driven clicks as relevance; a fraud model blocks cases whose natural outcomes can no longer be observed.",
-          "Log candidate sets, exposures, propensities, actions, review selection, and overrides; retain bounded exploration, unbiased holdouts, or randomized audits where safe.",
-          "On drift: validate data, wait for or acquire labels, train a candidate, run temporal and slice gates, shadow or canary, then promote or roll back. Never retrain solely because a distance alarm fired.",
+          "Log what the policy declined to do as carefully as what it did: the candidate set it saw, the propensity attached to each action it could have taken, and which cases a reviewer pulled out of the queue. Then hold back a randomized slice - 1% of traffic bypassing the model entirely - so one population's outcomes were never selected by the thing being measured.",
+          "Treat a drift alarm as the first step of a pipeline rather than the last. Validate the data, wait for or acquire labels, train a candidate, and put it through the same temporal and slice gates as any other release before shadowing it. Retraining because a distance crossed a threshold skips every step that would have established whether the new model is actually better.",
         ],
       },
     ],
@@ -1673,7 +2040,7 @@ export const mlTopics: RawStudyTopic[] = [
       {
         decision: "Sensitive drift alerts or stable actionable alerts",
         preferA: "Use sensitive diagnostics for investigation and high-harm features.",
-        preferB: "Alert only on sustained, material changes tied to an owner and playbook.",
+        preferB: "Alert only on sustained, material changes tied to an owner and playbook, and keep drift distances as monitored metrics rather than promoting them to blocking guardrail metrics.",
         watch: "Seasonality, correlated features, alert fatigue, and thresholds without outcome relevance.",
       },
       {
@@ -1705,6 +2072,11 @@ export const mlTopics: RawStudyTopic[] = [
         symptom: "Diversity and discovery shrink while offline replay appears to improve.",
         mitigation: "Log exposure propensities and preserve safe exploration or an unbiased evaluation holdout.",
       },
+      {
+        mode: "Drift thresholds were calibrated on a quiet week",
+        symptom: "Every seasonal peak reopens the same alert, and the on-call closes it unread within a minute.",
+        mitigation: "Compare against the equivalent period a year earlier where seasonality is genuine, require an alarm to persist across several intervals before it pages, and delete any threshold nobody has acted on twice.",
+      },
     ],
     interviewQuestions: [
       "How do covariate drift and concept drift differ operationally?",
@@ -1728,26 +2100,50 @@ export const mlTopics: RawStudyTopic[] = [
       {
         prompt: "A feature distribution shifts sharply but mature model performance is unchanged. What is the best response?",
         options: [
-          "Automatically promote a retrained model.",
-          "Delete the feature immediately.",
-          "Investigate data quality and causes, continue outcome monitoring, and retrain only through normal evidence gates.",
-          "Ignore all future drift alerts.",
+          "Promote a retrained model automatically.",
+          "Delete the drifting feature from serving.",
+          "Silence drift alerts for that feature.",
+          "Investigate causes, keep the usual gates.",
         ],
-        answerIndex: 2,
+        answerIndex: 3,
         explanation:
-          "Drift is diagnostic evidence, not proof of degradation or proof that retraining will help.",
+          "Drift is a diagnostic clue rather than proof of degradation, so the response is data validation and continued outcome monitoring, with retraining only through labeled and staged gates. Auto-retraining on a distance alarm is the named failure mode: versions churn after benign seasonality or corrupted input.",
       },
       {
         prompt: "Which example is concept drift?",
         options: [
-          "The device mix changes but behavior conditional on features stays constant.",
-          "For the same observed features, the probability of fraud changes after a new attack pattern.",
-          "A feature column becomes null due to a pipeline outage.",
-          "The model server's p99 latency increases.",
+          "The device mix moves; behavior given features holds.",
+          "Fraud probability changes for identical features.",
+          "A column goes null after a pipeline outage.",
+          "Server p99 latency climbs during peak hours.",
         ],
         answerIndex: 1,
         explanation:
-          "Concept drift is a change in the conditional relationship P(Y|X), here caused by changed attacker behavior.",
+          "Concept drift is a change in P(Y|X): the same observed features now imply a different outcome, as when attackers switch tactics. Calling a shift in device mix concept drift confuses it with covariate drift, where P(X) moves while the conditional relationship is intact.",
+      },
+      {
+        prompt: "A recommender's offline replay keeps improving while discovery and diversity shrink. What is the mechanism?",
+        options: [
+          "Calibration drifted along with the base rate.",
+          "The candidate index has grown stale on disk.",
+          "It trains only on outcomes it chose to show.",
+          "Replay is scored at the wrong maturity age.",
+        ],
+        answerIndex: 2,
+        explanation:
+          "The policy decides what is exposed, the logs record only those exposures, and training on them reinforces the incumbent while starving unshown items of evidence, so replay improves as real coverage narrows. Reading it as calibration drift misses that the data itself is selected by the model.",
+      },
+      {
+        prompt: "Overall precision is flat but a new-market cohort has clearly regressed. What did the dashboard need?",
+        options: [
+          "Predeclared slices with support and maturity.",
+          "A tighter global alert threshold on precision.",
+          "More frequent recompute of the same rollup.",
+          "One drift distance summarizing all features.",
+        ],
+        answerIndex: 0,
+        explanation:
+          "Stable high-volume traffic dilutes a cohort regression in the average, so outcome metrics are dimensioned by predeclared critical slice, release, and prediction cohort with uncertainty and label coverage. Tightening the global threshold is the reflex fix and it only trades a missed regression for noise, because the signal is not in the aggregate.",
       },
     ],
     recallCards: [
@@ -1772,7 +2168,7 @@ export const mlPrompts: DesignPrompt[] = [
       "Specify impression, position, dwell, action, and negative-feedback instrumentation.",
       "Handle new users, new items, sparse interests, and users with multiple intents.",
       "Design blended retrieval, multi-stage ranking, slate constraints, and deterministic fallbacks.",
-      "Address position bias, feedback loops, experiment interference, and delayed satisfaction.",
+      "Address position bias (ranking), feedback loops, experiment interference, and delayed satisfaction.",
       "Plan training cadence, embedding/index migration, progressive rollout, and rollback.",
     ],
     expectedTopics: [
@@ -1933,7 +2329,7 @@ export const mlPrompts: DesignPrompt[] = [
       "semantic retrieval",
       "hybrid candidate fusion",
       "learning to rank",
-      "position bias",
+      "position bias (ranking)",
       "NDCG and MRR",
       "query slicing",
       "index versioning",
@@ -1972,7 +2368,7 @@ export const mlPrompts: DesignPrompt[] = [
           { from: "qu", to: "inv", label: "terms" },
           { from: "qu", to: "ann", label: "embedding" },
           { from: "inv", to: "fuse", label: "postings" },
-          { from: "ann", to: "fuse", label: "neighbours" },
+          { from: "ann", to: "fuse", label: "neighbors" },
           { from: "fuse", to: "rerank", label: "top-k" },
           { from: "rerank", to: "user", label: "results" },
           { from: "rerank", to: "clicks", label: "logged", async: true },
@@ -2023,7 +2419,7 @@ export const mlPrompts: DesignPrompt[] = [
           points: [
             "Use graded relevance rubrics and overlap judgments; log skipped, clicked, reformulated, and completed sessions.",
             "Estimate position effects from bounded randomization and retain propensity plus presentation features.",
-            "Build term, semantic, quality, freshness, field-match, and query-document interaction features with strict index-time versioning.",
+            "Pin every feature to the index version that produced it, because a term-match score computed under one tokenizer and a semantic score computed under another describe different documents wearing the same id.",
           ],
         },
         {
@@ -2032,7 +2428,7 @@ export const mlPrompts: DesignPrompt[] = [
           points: [
             "Generate hard negatives from the active hybrid retriever, preventing the ranker from learning only trivial separations.",
             "Optimize pairwise or listwise ranking while validating task completion and calibrated satisfaction where probabilities are consumed.",
-            "Report exact-query, head, tail, locale, zero-result, and fresh-document slices with uncertainty, then interleave and A/B test.",
+            "Report each query regime on its own line with an interval, because head queries dominate the aggregate: an exact-identifier query that stops returning its document is invisible in a corpus-wide NDCG. Interleave first for sensitivity, then A/B test for absolute product impact.",
           ],
         },
         {
@@ -2106,7 +2502,7 @@ export const mlPrompts: DesignPrompt[] = [
     ],
     reference: {
       diagram: {
-        caption: "Calibrated probability drives the auction, so the model cannot be evaluated on ranking alone; delayed conversions arrive on their own path and must not be labelled negative early.",
+        caption: "Calibrated probability drives the auction, so the model cannot be evaluated on ranking alone; delayed conversions arrive on their own path and must not be labeled negative early.",
         nodes: [
           { id: "req", label: "Ad request", kind: "client", col: 0, row: 1 },
           { id: "auc", label: "Auction service", kind: "service", col: 1, row: 1 },
@@ -2184,7 +2580,7 @@ export const mlPrompts: DesignPrompt[] = [
           summary: "CTR is a probability product, so ranking lift without calibration is insufficient.",
           points: [
             "Train on sampled data, evaluate on natural prevalence, and fit placement-aware calibration only on held-out representative traffic.",
-            "Gate log loss, Brier score, PR-AUC, calibration and expected spend or utility by advertiser, placement, locale, and new-ad slices.",
+            "Gate on probability quality per placement, not on one global number: a model that is calibrated in aggregate can overprice a low-CTR placement by a factor of two, and the auction spends real money on that error every impression.",
             "Backtest by time to capture campaign and seasonality shifts; compare with the live champion on paired impressions.",
           ],
         },
@@ -2487,7 +2883,7 @@ export const mlPrompts: DesignPrompt[] = [
           summary: "Risk probabilities must remain calibrated and stable at the policy boundary.",
           points: [
             "Use chronological and economic-regime backtests, representative calibration data, and uncertainty around expected loss.",
-            "Evaluate ranking, log loss, reliability, decision cost, approval and bad rates, plus slice calibration and stability.",
+            "Translate every candidate into the two numbers the credit committee argues about - the approval rate it implies and the bad rate that follows - and show reliability by slice underneath them, since a ranking gain that moves neither number buys nothing.",
             "Create stable reason factors from validated feature contributions or a policy-approved interpretable model; test fidelity and consistency.",
           ],
         },
@@ -2702,7 +3098,7 @@ export const mlPrompts: DesignPrompt[] = [
     commonFailureModes: [
       "Using actual completed-route information in departure-time features.",
       "Optimizing mean error while severe underestimates remain hidden.",
-      "Dropping cancelled or heavily delayed trips without analyzing selection bias.",
+      "Dropping canceled or heavily delayed trips without analyzing selection bias.",
       "Updating ETA so aggressively that the user-facing estimate oscillates.",
       "Training on current corrected traffic rather than what was available at prediction time.",
     ],
@@ -2791,7 +3187,7 @@ export const mlPrompts: DesignPrompt[] = [
           summary: "Quantiles express asymmetric uncertainty that a mean hides.",
           points: [
             "Train median and tail quantiles with pinball loss or a probabilistic duration model; correct crossing quantiles if necessary.",
-            "Evaluate signed error, MAE, tail miss, interval coverage and width across stage, region, distance, incident, and new-route slices.",
+            "Report signed error next to MAE, because a route that runs four minutes late half the time and four minutes early the rest scores the same MAE as one that is never wrong, and only the first one loses customers. Break both out by stage, region, and incident, and add the tail-miss rate that averages hide.",
             "Calibrate intervals on held-out temporal cohorts and test that nominal 90% intervals cover about 90% by supported slice.",
           ],
         },

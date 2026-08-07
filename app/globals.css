@@ -1314,6 +1314,8 @@ h2 {
 .mock-phases small { color: var(--rail-muted); font-size: 0.79rem; }
 .mock-phases em { color: #bab7ff; font-family: var(--mono); font-size: 0.78rem; font-style: normal; }
 .mock-followups { margin-top: 20px; }
+.mock-followups .question-list { margin-top: 14px; }
+.mock-followups .section-note { margin-top: 14px; white-space: normal; }
 
 .review-grid {
   display: grid;
@@ -1877,6 +1879,9 @@ h2 {
   width: 100%;
   min-width: 620px;
   height: auto;
+  /* The viewBox is sized to the drawn geometry, but an SVG root clips to it by
+     default; this keeps a stray label visible rather than silently gone. */
+  overflow: visible;
 }
 
 .arch-figure figcaption {

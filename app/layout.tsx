@@ -20,7 +20,7 @@ export const metadata: Metadata = {
     template: "%s · System Design Interview Lab",
   },
   description:
-    "An eight-week active-recall workspace for distributed systems, ML system design, LLM infrastructure, estimation, and timed interview practice.",
+    "A twelve-week active-recall workspace for distributed systems, ML system design, LLM infrastructure, estimation, and timed interview practice.",
   alternates: { canonical: siteUrl },
   // Next does not apply basePath to metadata icons, so prepend it here. Building
   // these from NEXT_PUBLIC_SITE_URL instead would point non-CI builds at localhost.
@@ -31,7 +31,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     title: "System Design Interview Lab",
-    description: "Turn technical depth into interview signal with an eight-week practice system.",
+    description: "Turn technical depth into interview signal with a twelve-week practice system.",
     url: siteUrl,
     siteName: "System Design Interview Lab",
     images: [{ url: `${siteUrl}/og.png`, width: 1734, height: 907, alt: "System Design Interview Lab study workspace" }],
