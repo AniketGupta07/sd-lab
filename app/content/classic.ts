@@ -1,6 +1,6 @@
-import type { DesignPrompt, StudyTopic } from "./types";
+import type { DesignPrompt, RawStudyTopic } from "./types";
 
-export const classicTopics: StudyTopic[] = [
+export const classicTopics: RawStudyTopic[] = [
   {
     id: "classic-feed-fanout",
     week: 4,

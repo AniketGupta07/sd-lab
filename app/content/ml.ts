@@ -1,6 +1,6 @@
-import type { DesignPrompt, StudyTopic } from "./types";
+import type { DesignPrompt, RawStudyTopic } from "./types";
 
-export const mlTopics: StudyTopic[] = [
+export const mlTopics: RawStudyTopic[] = [
   {
     id: "ml-problem-framing",
     week: 8,

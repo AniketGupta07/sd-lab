@@ -2125,3 +2125,184 @@ h2 {
   .practice-sticky { position: static; }
   .section-toggle-meta small { display: none; }
 }
+
+/* ── Beginner primer ────────────────────────────────────────────────── */
+
+/*
+ * The primer is long-form reading rather than scannable reference, so it gets
+ * a serif face, a measure capped near 68 characters, and generous leading.
+ * Everything else on the topic page is deliberately denser than this.
+ */
+.primer-panel .section-body { padding-bottom: clamp(22px, 2.4vw, 32px); }
+
+.primer-lede {
+  display: grid;
+  gap: 18px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.primer-plain {
+  max-width: 68ch;
+  font-family: var(--serif);
+  font-size: 1.12rem;
+  line-height: 1.66;
+  color: var(--ink);
+}
+
+.primer-analogy {
+  max-width: 72ch;
+  padding: 16px 20px;
+  border-left: 3px solid var(--teal);
+  border-radius: 0 8px 8px 0;
+  background: var(--teal-wash);
+}
+
+.primer-analogy p:not(.eyebrow) {
+  margin: 6px 0 0;
+  font-family: var(--serif);
+  font-size: 1rem;
+  line-height: 1.62;
+  color: var(--ink);
+}
+
+.primer-sections { display: grid; gap: 28px; padding-top: 24px; }
+
+.primer-sections h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 0 12px;
+  font-family: var(--serif);
+  font-size: 1.24rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.primer-sections h3 span {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--indigo);
+  letter-spacing: 0.06em;
+}
+
+.primer-sections p {
+  max-width: 68ch;
+  margin: 0 0 12px;
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+.primer-sections p:last-child { margin-bottom: 0; }
+
+.primer-example {
+  margin: 28px 0 0;
+  padding: 22px clamp(16px, 2vw, 24px);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--canvas);
+}
+
+.primer-example figcaption { margin-bottom: 12px; }
+.primer-example figcaption strong { font-family: var(--serif); font-size: 1.18rem; font-weight: 600; }
+
+.primer-example-setup {
+  max-width: 68ch;
+  margin: 0 0 18px;
+  font-size: 0.97rem;
+  line-height: 1.68;
+  color: var(--ink-soft);
+}
+
+.primer-example ol {
+  display: grid;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 0;
+  list-style: none;
+  counter-reset: primer-step;
+}
+
+.primer-example ol li { display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: start; }
+
+.primer-example ol li > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--indigo);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.primer-example ol li p {
+  max-width: 66ch;
+  margin: 2px 0 0;
+  font-size: 0.97rem;
+  line-height: 1.66;
+  color: var(--ink-soft);
+}
+
+.primer-example-takeaway {
+  max-width: 68ch;
+  margin: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--serif);
+  font-size: 1.02rem;
+  line-height: 1.66;
+  color: var(--ink);
+}
+
+.primer-example-takeaway strong { color: var(--indigo); }
+
+/* ── Glossary ───────────────────────────────────────────────────────── */
+
+.glossary-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 2px;
+  margin: 0;
+}
+
+.glossary-list > div {
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: var(--canvas);
+}
+
+.glossary-list dt {
+  margin-bottom: 5px;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.glossary-expansion {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.79rem;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--teal);
+}
+
+.glossary-list dd {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.58;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 720px) {
+  .glossary-list { grid-template-columns: 1fr; }
+  .primer-example ol li { grid-template-columns: 22px 1fr; gap: 10px; }
+  .primer-example ol li > span { width: 22px; height: 22px; font-size: 0.72rem; }
+}

@@ -354,8 +354,12 @@ type StudyState = {
  * order: mechanics first, the rest opened deliberately.
  */
 const topicSections = {
+  primer: { eyebrow: "Start here", title: "Explained from zero", defaultOpen: true },
+  glossary: { eyebrow: "Vocabulary", title: "Every term this module uses", defaultOpen: true },
   mechanics: { eyebrow: "Mechanics", title: "What happens under the hood", defaultOpen: true },
-  tradeoffs: { eyebrow: "Trade-offs", title: "Say these aloud", defaultOpen: true },
+  // Closed by default now that the primer sits above it: the top of the page
+  // should be the explanation, not four open panels of compressed prose.
+  tradeoffs: { eyebrow: "Trade-offs", title: "Say these aloud", defaultOpen: false },
   failures: { eyebrow: "Failure diagnosis", title: "How this breaks in production", defaultOpen: false },
   questions: { eyebrow: "Pressure questions", title: "What an interviewer will push on", defaultOpen: false },
   checklist: { eyebrow: "Decision discipline", title: "Before leaving this topic", defaultOpen: false },
@@ -1541,6 +1545,51 @@ export default function Home() {
             <p className="eyebrow">Core concepts</p>
             <ul className="tag-list large">{activeTopic.concepts.map((item) => <li key={item}>{item}</li>)}</ul>
           </article>
+
+          <Section id="primer" note="No background assumed" className="primer-panel">
+            <div className="primer-lede">
+              <p className="primer-plain">{activeTopic.primer.plainSummary}</p>
+              <aside className="primer-analogy">
+                <p className="eyebrow">Think of it like</p>
+                <p>{activeTopic.primer.analogy}</p>
+              </aside>
+            </div>
+            <div className="primer-sections">
+              {activeTopic.primer.sections.map((section, index) => (
+                <section key={section.heading}>
+                  <h3><span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>{section.heading}</h3>
+                  {section.body.map((paragraph) => <p key={paragraph.slice(0, 48)}>{paragraph}</p>)}
+                </section>
+              ))}
+            </div>
+            <figure className="primer-example">
+              <figcaption>
+                <p className="eyebrow">Worked example</p>
+                <strong>{activeTopic.primer.workedExample.title}</strong>
+              </figcaption>
+              <p className="primer-example-setup">{activeTopic.primer.workedExample.setup}</p>
+              <ol>
+                {activeTopic.primer.workedExample.steps.map((step, index) => (
+                  <li key={step.slice(0, 48)}><span aria-hidden="true">{index + 1}</span><p>{step}</p></li>
+                ))}
+              </ol>
+              <p className="primer-example-takeaway"><strong>Takeaway.</strong> {activeTopic.primer.workedExample.takeaway}</p>
+            </figure>
+          </Section>
+
+          <Section id="glossary" count={activeTopic.glossary.length} note="Defined before it is used" className="glossary-panel">
+            <dl className="glossary-list">
+              {activeTopic.glossary.map((entry) => (
+                <div key={entry.term}>
+                  <dt>
+                    {entry.term}
+                    {entry.expansion ? <span className="glossary-expansion">{entry.expansion}</span> : null}
+                  </dt>
+                  <dd>{entry.definition}</dd>
+                </div>
+              ))}
+            </dl>
+          </Section>
 
           <Section id="mechanics" count={activeTopic.deepDive.length} note="Explain, don't name-drop" className="deep-dive-panel">
             <div className="deep-dive-list">

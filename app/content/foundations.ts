@@ -1,6 +1,6 @@
-import type { DesignPrompt, StudyTopic } from "./types";
+import type { DesignPrompt, RawStudyTopic } from "./types";
 
-export const foundationTopics: StudyTopic[] = [
+export const foundationTopics: RawStudyTopic[] = [
   {
     id: "estimation",
     week: 1,

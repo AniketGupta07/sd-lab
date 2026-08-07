@@ -295,6 +295,57 @@ test("folds long pages into sections and phases", async () => {
   assert.match(css, /\.arch-edge-label \{[^}]*paint-order: stroke fill/s, "diagram labels need a halo to stay legible");
 });
 
+test("explains every module from zero and defines its vocabulary", async () => {
+  const primerPaths = ["foundations.ts", "classic.ts", "ml.ts", "llm.ts"];
+  const primerSources = await Promise.all(primerPaths.map((name) =>
+    readFile(new URL(`../app/content/primers/${name}`, import.meta.url), "utf8")));
+  const primers = primerSources.join("\n");
+
+  // One primer per module, and the merge refuses to ship a module without one
+  // rather than rendering a topic whose "start here" section is missing.
+  const topicIds = (await Promise.all(contentPaths.map((name) =>
+    readFile(new URL(`../app/content/${name}`, import.meta.url), "utf8"))))
+    .flatMap((source) => {
+      const topicsOnly = source.split(/export const \w+Prompts/)[0];
+      return [...topicsOnly.matchAll(/^ {4}id: "([\w-]+)",$/gm)].map((match) => match[1]);
+    });
+  assert.equal(topicIds.length, 53, "every module must be discovered before checking its primer");
+  for (const id of topicIds) {
+    assert.match(primers, new RegExp(`^ {2}"?${escapeRegExp(id)}"?: \\{$`, "m"), `${id} has no from-zero primer`);
+  }
+
+  const studyData = await readFile(new URL("../app/studyData.ts", import.meta.url), "utf8");
+  assert.match(studyData, /these modules have no primer/, "a missing primer must fail the build, not render empty");
+  assert.match(studyData, /primers reference unknown modules/, "an orphaned primer must fail the build too");
+
+  // Every primer carries the four things a reader with no background needs:
+  // plain language, an analogy, build-up sections, and one worked example.
+  for (const field of ["plainSummary:", "analogy:", "sections: [", "workedExample: {", "glossary: ["]) {
+    const occurrences = primers.split(field).length - 1;
+    assert.equal(occurrences, 53, `every module needs ${field.replace(/[:[{ ]/g, "")}`);
+  }
+
+  // The rule this whole layer exists to enforce: an acronym is never used
+  // without being expanded. The build asserts it; this pins the assertion.
+  assert.match(studyData, /glossary acronym .+ must be expanded/, "acronyms must be expanded, not merely listed");
+  const bareAcronyms = [...primers.matchAll(/\{ term: "([A-Z0-9]{2,6}(?:\/[A-Z0-9]{2,6})*)"(?!, expansion)/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(bareAcronyms, [], "these acronym-shaped terms carry no expansion");
+
+  // Substance is checked over a whole section, so a one-line lede stays legal
+  // while an empty section does not.
+  assert.match(studyData, /primer section "\$\{section\.heading\}" is too thin/, "section substance must be enforced");
+
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /primer: \{ eyebrow: "Start here"[^}]*defaultOpen: true/, "the primer must open first on the page");
+  assert.match(page, /glossary: \{ eyebrow: "Vocabulary"[^}]*defaultOpen: true/, "the glossary must be open, not hidden behind a click");
+  assert.match(page, /activeTopic\.primer\.workedExample\.steps\.map/, "the worked example must render its steps");
+  assert.match(page, /entry\.expansion \? <span className="glossary-expansion">/, "expansions must be shown, not just stored");
+
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.primer-plain \{[^}]*max-width: 68ch/s, "long-form primer prose needs a readable measure");
+});
+
 test("keeps personal information out of publishable source", async () => {
   const appSource = await readTextTree(new URL("../app/", import.meta.url), [".ts", ".tsx", ".css"]);
   const publicText = await readTextTree(new URL("../public/", import.meta.url), [".svg", ".txt", ".json"]);

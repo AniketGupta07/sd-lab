@@ -1,6 +1,6 @@
-import type { DesignPrompt, StudyTopic } from "./types";
+import type { DesignPrompt, RawStudyTopic } from "./types";
 
-export const llmTopics: StudyTopic[] = [
+export const llmTopics: RawStudyTopic[] = [
   {
     id: "llm-inference-execution",
     week: 11,

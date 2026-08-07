@@ -2,7 +2,11 @@ import { classicPrompts, classicTopics } from "./content/classic";
 import { foundationPrompts, foundationTopics } from "./content/foundations";
 import { llmPrompts, llmTopics } from "./content/llm";
 import { mlPrompts, mlTopics } from "./content/ml";
-import type { CurriculumTier, DesignPrompt, StudyTopic } from "./content/types";
+import { classicPrimers } from "./content/primers/classic";
+import { foundationPrimers } from "./content/primers/foundations";
+import { llmPrimers } from "./content/primers/llm";
+import { mlPrimers } from "./content/primers/ml";
+import type { CurriculumTier, DesignPrompt, RawStudyTopic, StudyTopic, TopicPrimerEntry } from "./content/types";
 
 export type { ArchitectureDiagram, DesignCategory, DesignPrompt, StudyTopic } from "./content/types";
 
@@ -150,7 +154,35 @@ export const curriculumWeeks: WeekPlan[] = [
   },
 ];
 
-export const allTopics: StudyTopic[] = [...foundationTopics, ...classicTopics, ...mlTopics, ...llmTopics]
+/**
+ * The beginner layer lives in its own files so it reads as one continuous body
+ * of writing rather than being scattered through four content files that are
+ * already hundreds of kilobytes each. Merging here means a module cannot ship
+ * without one: `attachPrimers` throws rather than rendering a topic with a
+ * missing "start here" section, which would be the one failure a beginner
+ * could least recover from.
+ */
+const topicPrimers: Record<string, TopicPrimerEntry> = {
+  ...foundationPrimers,
+  ...classicPrimers,
+  ...mlPrimers,
+  ...llmPrimers,
+};
+
+function attachPrimers(topics: RawStudyTopic[]): StudyTopic[] {
+  const missing = topics.filter((topic) => !topicPrimers[topic.id]).map((topic) => topic.id);
+  if (missing.length > 0) {
+    throw new Error(`Study content invariant failed: these modules have no primer: ${missing.join(", ")}`);
+  }
+  const known = new Set(topics.map((topic) => topic.id));
+  const orphaned = Object.keys(topicPrimers).filter((id) => !known.has(id));
+  if (orphaned.length > 0) {
+    throw new Error(`Study content invariant failed: primers reference unknown modules: ${orphaned.join(", ")}`);
+  }
+  return topics.map((topic) => ({ ...topic, ...topicPrimers[topic.id] }));
+}
+
+export const allTopics: StudyTopic[] = attachPrimers([...foundationTopics, ...classicTopics, ...mlTopics, ...llmTopics])
   .sort((a, b) => a.week - b.week || a.day - b.day);
 
 export const designPrompts: DesignPrompt[] = [...foundationPrompts, ...classicPrompts, ...mlPrompts, ...llmPrompts];
@@ -192,6 +224,40 @@ function validateStudyContent(topics: StudyTopic[], prompts: DesignPrompt[]) {
       assertStudyContent(question.options.length >= 3, `${topic.id} quiz needs plausible options`);
       assertStudyContent(question.answerIndex >= 0 && question.answerIndex < question.options.length, `${topic.id} quiz answer is invalid`);
       assertStudyContent(question.explanation.length >= 40, `${topic.id} quiz needs an explanation`);
+    }
+
+    // The beginner layer. These thresholds exist because the failure mode they
+    // guard against is a primer that technically exists and explains nothing.
+    const { primer, glossary } = topic;
+    assertStudyContent(primer.plainSummary.length >= 200, `${topic.id} needs a plain-language summary that actually explains the module`);
+    assertStudyContent(primer.analogy.length >= 200, `${topic.id} needs a concrete analogy, not a one-line comparison`);
+    assertStudyContent(primer.sections.length >= 3, `${topic.id} primer needs at least three build-up sections`);
+    for (const section of primer.sections) {
+      assertStudyContent(section.heading.length >= 10, `${topic.id} primer section needs a real heading`);
+      assertStudyContent(section.body.length >= 2, `${topic.id} primer section needs connected paragraphs, not a single line`);
+      // Substance is measured over the section, not per paragraph: a one-line
+      // lede or an enumerated item is good prose, and a per-paragraph floor
+      // would only force it to be padded.
+      const prose = section.body.join(" ");
+      assertStudyContent(prose.length >= 700, `${topic.id} primer section "${section.heading}" is too thin to teach anything`);
+      for (const paragraph of section.body) {
+        assertStudyContent(paragraph.length >= 60, `${topic.id} primer has an empty or stub paragraph`);
+      }
+    }
+    assertStudyContent(primer.workedExample.setup.length >= 100, `${topic.id} worked example needs a concrete setup`);
+    assertStudyContent(primer.workedExample.steps.length >= 5, `${topic.id} worked example needs at least five steps`);
+    for (const step of primer.workedExample.steps) {
+      assertStudyContent(step.length >= 80, `${topic.id} worked example step is too thin`);
+    }
+    assertStudyContent(primer.workedExample.takeaway.length >= 150, `${topic.id} worked example needs a takeaway that generalises`);
+
+    assertStudyContent(glossary.length >= 8, `${topic.id} needs a glossary covering the terms it uses`);
+    assertStudyContent(new Set(glossary.map((entry) => entry.term)).size === glossary.length, `${topic.id} glossary has duplicate terms`);
+    for (const entry of glossary) {
+      assertStudyContent(entry.definition.length >= 60, `${topic.id} glossary entry "${entry.term}" needs a real definition`);
+      // An acronym without its expansion is exactly what this module set out to fix.
+      const looksLikeAcronym = /^[A-Z0-9]{2,6}(\/[A-Z0-9]{2,6})*$/.test(entry.term);
+      assertStudyContent(!looksLikeAcronym || Boolean(entry.expansion), `${topic.id} glossary acronym "${entry.term}" must be expanded`);
     }
   }
 
