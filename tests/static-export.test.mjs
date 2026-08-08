@@ -28,8 +28,12 @@ test("exports the complete interview study workspace", async () => {
   const visibleHtml = renderedHtml(html);
 
   assert.match(visibleHtml, /<title>System Design Interview Lab<\/title>/i);
-  assert.match(visibleHtml, /Turn technical depth into interview signal\./);
-  assert.match(visibleHtml, /Week\s*01\s*·\s*Tier\s*0/);
+  // The landing headline used to be a constant marketing line, identical on day
+  // 1 and day 365, above a lede restating the week. It is now the state the
+  // learner opened the app to check, so the pin has to be on the state: which
+  // week, how far through it, and what is next.
+  assert.match(visibleHtml, /Week\s*1\s*·\s*0 of \d+ modules/);
+  assert.match(visibleHtml, /Next up:/);
   assert.match(visibleHtml, /URL shortener/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 
@@ -272,7 +276,18 @@ test("renders selectors for every week and every prompt category", async () => {
 
   assert.deepEqual(weekSelectors, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   assert.match(studyData, /export const curriculumWeeks: WeekPlan\[\] = weekPlanSeeds\.map/, "weekly hours must be derived, not hand-written");
-  assert.match(page, /className="topic-week-tabs"[\s\S]*?curriculumWeeks\.map\(\(week\)/);
+  // The week selector used to be a 12-cell grid, `.topic-week-tabs`, rendered
+  // above the module title: 241px of navigation on a laptop and 903px on a
+  // phone before the first teaching word. It is now a wrapping chip row. What
+  // the check is for is unchanged and must not weaken: every one of the twelve
+  // weeks is reachable from the module page, driven off `curriculumWeeks`
+  // rather than a hand-written list.
+  assert.match(page, /className="topic-week-chips"[\s\S]*?curriculumWeeks\.map\(\(week\)/);
+  assert.match(
+    page,
+    /\{current\s*\?\s*<strong>\{week\.title\}<\/strong>\s*:\s*<em className="sr-only">\{week\.title\}<\/em>\}/,
+    "only the active chip shows its title on screen, so the other eleven must keep theirs for screen readers",
+  );
   assert.match(page, /const visiblePrompts = designPrompts\.filter\(\(prompt\) => prompt\.category === practiceCategory\)/);
   assert.match(page, /\(\["classic",\s*"ml",\s*"llm"\] as DesignCategory\[\]\)\.map/);
   assert.match(page, /className="prompt-switcher"[\s\S]*?visiblePrompts\.map\(\(prompt\)/);
@@ -285,6 +300,25 @@ test("keeps personal study data local, versioned, and migration-preserving", asy
   assert.match(page, /ai-system-design-study:v1/);
   assert.match(page, /window\.localStorage\.setItem/);
   assert.match(page, /window\.confirm/);
+
+  // localStorage is the only store, so the destructive path must not be a
+  // one-way door: it snapshots what it removes, offers an in-page undo, and
+  // sits beside an export that outlives the browser profile entirely.
+  assert.match(page, /const BACKUP_KEY = `\$\{STORAGE_KEY\}:backup`/, "reset must snapshot before it removes");
+  assert.match(
+    page,
+    /const snapshot = JSON\.stringify\(study\);[\s\S]{0,400}window\.localStorage\.setItem\(BACKUP_KEY, snapshot\);[\s\S]{0,400}window\.localStorage\.removeItem\(STORAGE_KEY\)/,
+    "the backup must be written before the removal, not after",
+  );
+  assert.match(page, /function undoReset\(\)/, "a cleared profile must be recoverable in-session");
+  assert.match(page, /function exportProgress\(\)/, "the learner must be able to take their data with them");
+  // Reset sits one button away from Pause and used to discard a running
+  // attempt in silence.
+  assert.match(
+    page,
+    /if \(study\.draft\.deadline && !window\.confirm\(/,
+    "resetting a running clock must be confirmed; resetting an idle one must not be",
+  );
   assert.match(page, /prefers-color-scheme: dark/);
   assert.match(page, /function mergeStoredState\(raw: string\): StudyState/);
   assert.match(page, /saved\.version !== 1\) return fallback/, "a stored payload from another schema version must fall back");
@@ -294,6 +328,33 @@ test("keeps personal study data local, versioned, and migration-preserving", asy
   // so an older or hand-edited payload can never inject an unknown shape into state.
   assert.match(page, /topics:\s*Object\.fromEntries\(\s*allTopics\.map/s);
   assert.match(page, /Math\.max\(1, Math\.min\(5, Math\.round\(rawTopic\.confidence\)\)\)/, "restored confidence must stay clamped to 1-5");
+  // A numeric default made the app assert a self-rating nobody gave, and made
+  // "weak topics" unable to fire until someone actively downrated. Unrated is
+  // now a real state, so it has to survive the round trip as one: no default on
+  // write, no invented number on read.
+  assert.match(page, /confidence: number \| null/, "confidence must be able to be unrated");
+  assert.match(page, /\{ status: "not-started", confidence: null, notes: "" \}/, "a new module must start unrated");
+  assert.match(
+    page,
+    /Number\.isFinite\(rawTopic\.confidence\)\s*\?\s*Math\.max\(1, Math\.min\(5, Math\.round\(rawTopic\.confidence\)\)\)\s*:\s*null/s,
+    "an absent stored confidence must restore as unrated, not as a number",
+  );
+  assert.match(page, /progress\.confidence === null\) return false/, "an unrated module cannot be a weak topic");
+
+  // Three controls used to accept input and throw it away: the 20-question
+  // reliability checklist was uncontrolled, the mock's stage ticks were
+  // component state, and switching estimation drill tabs wiped the typed
+  // calculation. All three now live in the one object that is persisted.
+  assert.match(page, /checklist: Record<string, boolean>/, "the score checklist must be part of the saved draft");
+  assert.match(page, /checklist: normalizeChecklist\(raw\.checklist\)/, "checklist ticks must be restored through the validating path");
+  assert.match(page, /drills: normalizeDrills\(saved\.drills\)/, "typed drill calculations must survive a reload");
+  assert.match(page, /mock: normalizeMock\(saved\.mock\)/, "the mock's stage checklist must survive a reload");
+  // A spoken mock used to leave no trace: nothing recorded that one had
+  // happened, so the surface the syllabus schedules three times could be run
+  // ten times and still read as untouched.
+  assert.match(page, /log: Array<\{ promptId: string; date: string \}>/, "completed mocks must be recorded, not only ticked");
+  assert.match(page, /designPrompts\.some\(\(item\) => item\.id === entry\.promptId\)/, "a logged mock for a deleted prompt must be dropped");
+  assert.doesNotMatch(page, /function chooseDrill\([^)]*\) \{[^}]*setDrillAnswer\(""\)/s, "switching drill tabs must not erase the answer");
   assert.match(page, /notes:\s*typeof rawTopic\.notes === "string"/, "per-topic notes must survive a reload");
   assert.match(page, /typeof rawTopic\.lastReviewedAt === "string" \? \{ lastReviewedAt: rawTopic\.lastReviewedAt \} : \{\}/, "review dates must survive a reload");
   assert.match(page, /mistakes:\s*Array\.isArray\(saved\.mistakes\)/);
@@ -327,6 +388,20 @@ test("keeps retrieval practice and the whiteboard honest", async () => {
   // The sketch is the point of the whiteboard: it must persist with the attempt.
   assert.match(page, /function SketchPad\(/);
   assert.match(page, /touch-action|setPointerCapture/, "drawing must work with pointer input");
+  // The bitmap is a fixed 1600x900 scaled to fit, so a literal lineWidth of 3
+  // drew a 0.58px hairline on a phone. The pen is specified in rendered pixels.
+  assert.match(
+    page,
+    /context\.lineWidth = Math\.max\(3, 3 \* \(SKETCH_WIDTH \/ rendered\)\)/,
+    "the pen must be sized against the rendered canvas, not the bitmap",
+  );
+  // An empty canvas is not a skipped step: the Architecture textarea on the
+  // same step records the same attempt, and the canvas is pointer-only.
+  assert.match(
+    page,
+    /const architectureAttempted = study\.draft\.sketch\.length > 0 \|\| study\.draft\.fields\.architecture\.trim\(\)\.length > 0;/,
+    "the reference gate must accept the written architecture as an attempt",
+  );
   assert.match(page, /draft: \{ \.\.\.current\.draft, sketch \}/, "sketches must persist with the draft");
 
   // Retrieval practice must be drivable from the keyboard: reaching for the
@@ -334,7 +409,23 @@ test("keeps retrieval practice and the whiteboard honest", async () => {
   assert.match(page, /if \(view !== "recall" \|\| !activeCard\) return;/);
   assert.match(page, /event\.key === " " \|\| event\.key === "Enter"/, "space must reveal");
   assert.match(page, /\["1", "2", "3", "4"\]\.indexOf\(event\.key\)/, "1-4 must grade");
-  assert.match(page, /\["INPUT", "TEXTAREA", "SELECT"\]\.includes\(target\.tagName\)/, "shortcuts must not fire while typing");
+  // The shortcuts hang off a window listener that calls preventDefault(), which
+  // cancels the browser's synthesized click. A tagName allow-list missed BUTTON
+  // and so killed Enter on the sidebar, the scope chips and "back to topic lab"
+  // — a real keyboard trap. Both guards below are the fix and must stay:
+  //   1. never fire inside a text field, matched by ancestor not by tagName;
+  //   2. never swallow Space/Enter from a control that owns those keys.
+  assert.match(
+    page,
+    /target\?\.isContentEditable \|\| target\?\.closest\("input, textarea, select"\)/,
+    "shortcuts must not fire while typing",
+  );
+  assert.match(
+    page,
+    /const onControl = Boolean\(target\?\.closest\('button, a, summary, \[role="button"\]'\)\)/,
+    "reveal must not swallow Space/Enter from the focused control",
+  );
+  assert.match(page, /!recallRevealed && !onControl &&/, "the reveal branch must honour the focused control");
 });
 
 test("folds long pages into sections and phases", async () => {
@@ -346,12 +437,60 @@ test("folds long pages into sections and phases", async () => {
   assert.match(page, /defaultOpen: true/);
   assert.match(page, /defaultOpen: false/);
   assert.match(page, /collapsed: Record<string, boolean>/);
-  assert.match(page, /key in topicSections && typeof value === "boolean"/, "restored section state must be validated");
+  // Restored section state is still validated against what this build knows,
+  // but the key space grew: the primer's fold is remembered per module
+  // (`primer:<topicId>`), because folding away the beginner explanation of week
+  // 1 must not fold away the one for week 11. Unknown keys — including a
+  // primer key for a module that no longer exists — are still dropped.
+  assert.match(page, /isKnownSectionKey\(key\) && typeof value === "boolean"/, "restored section state must be validated");
+  assert.match(
+    page,
+    /function isKnownSectionKey\(key: string\) \{\s*return key in topicSections \|\| \(key\.startsWith\("primer:"\) && allTopics\.some\(/,
+    "the validator must still reject keys this build does not understand",
+  );
+  assert.match(
+    page,
+    /if \(id === "primer"\) return \(study\.topics\[activeTopicId\]\?\.status \?\? "not-started"\) === "not-started";/,
+    "the primer must default open only on a module the learner has not started",
+  );
   assert.match(page, /aria-expanded=\{open\}/, "disclosure state must be exposed to assistive tech");
+  // Eight foldable sections with no in-page anchors made "read the trade-offs"
+  // a scroll hunt. The sub-rail is driven off the section table so it cannot
+  // list a section the page does not render.
+  assert.match(page, /const topicSectionOrder = Object\.keys\(topicSections\)/, "the sub-rail must be derived from the section table");
+  assert.match(page, /className="topic-subrail"[\s\S]*?topicSectionOrder\.map\(\(id\)/);
+  assert.match(page, /function jumpToSection\(id: TopicSectionId\) \{\s*if \(!isSectionOpen\(id\)\) toggleSection\(id\);/, "jumping to a folded section must open it");
 
   // The design room is worked one phase at a time so a timed attempt is not a
   // scroll hunt, and the clock stays pinned while it runs.
   assert.match(page, /const practiceSteps: Array<\{/);
+  // The step plan sits directly beside a live countdown, and prompts run 40 to
+  // 60 minutes. A literal minute range was silently wrong by up to 26 minutes,
+  // so the budget must stay a reference to a phase share, resolved against the
+  // prompt actually being attempted — the same derivation `interviewPhases`
+  // already uses, not a second implementation of it.
+  assert.match(page, /function stepMinutes\(step: \{ phase\?: string \}, totalMinutes: number\)/);
+  assert.match(page, /<small>\{stepMinutes\(step, activePrompt\.durationMinutes\)\}<\/small>/, "the step budget must be resolved per prompt");
+  const stepBlock = page.match(/const practiceSteps: Array<\{[\s\S]*?\n\];/)?.[0] ?? "";
+  assert.doesNotMatch(stepBlock, /minutes: "/, "no step may carry a hardcoded minute range");
+  assert.match(stepBlock, /\{ id: "compare", label: "Compare", fields: \[\], kind: "reference" \}/, "compare happens after the clock stops");
+
+  // Overlay scrollbars measure 0px on macOS, so a strip hiding 59% of its items
+  // looked exactly like one that fit. Two of the four now wrap; the ones that
+  // still scroll must say so, and must keep the selected tile on screen.
+  assert.match(page, /function useOverflowFade<T extends HTMLElement>/, "a scrolling strip must report its hidden edges");
+  assert.match(page, /data-fade=\{promptStripFade\}/);
+  assert.match(page, /data-fade=\{stepStripFade\}/);
+  assert.match(page, /scrollActiveIntoView\(promptStripRef\.current\)/, "the selected prompt must never be off-screen");
+
+  // The 40-minute clock existed in exactly one view: navigating away left no
+  // digits anywhere in the DOM, and zero rendered identically to 40:00 beside a
+  // dead "Resume".
+  assert.match(page, /const timerChipState: "off" \| "running" \| "expired"/, "a live attempt must be visible from every view");
+  assert.match(page, /className="timer-chip"[\s\S]{0,400}onClick=\{\(\) => selectView\("practice"\)\}/, "the header clock must route back to the design room");
+  assert.match(page, /const startFrom = secondsLeft > 0 \? secondsLeft : activePrompt\.durationMinutes \* 60;/, "the timer must not restart from zero seconds");
+  assert.match(page, /secondsLeft === 0 \? "Start again"/, "zero is a distinct state, not a resumable pause");
+  assert.match(page, /role="timer"/, "an aria-label on a roleless span is discarded");
   assert.match(page, /activeStep\.kind === "sketch"/);
   assert.match(page, /activeStep\.kind === "reference"/);
   assert.match(page, /activeStep\.kind === "score"/);
@@ -359,6 +498,8 @@ test("folds long pages into sections and phases", async () => {
 
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.practice-sticky \{[^}]*position: sticky/s, "the work bar must stay on screen");
+  assert.match(css, /\[data-fade="end"\] \{\s*mask-image:/, "a strip with content past its edge must fade it");
+  assert.match(css, /\.timer\[data-expired="true"\] \{[^}]*color: var\(--danger\)/, "a finished clock must not render identically to a full one");
   assert.match(css, /\.arch-edge-label \{[^}]*paint-order: stroke fill/s, "diagram labels need a halo to stay legible");
 });
 
@@ -423,7 +564,13 @@ test("explains every module from zero and defines its vocabulary", async () => {
   assert.match(page, /entry\.expansion \? <span className="glossary-expansion">/, "expansions must be shown, not just stored");
 
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.primer-plain \{[^}]*max-width: 68ch/s, "long-form primer prose needs a readable measure");
+  // The measure is one token now, applied to every prose block, so two
+  // adjacent paragraphs can no longer disagree about line length. Pin both
+  // halves: the block reaching for the token, and the token's own value —
+  // "one measure" is worth nothing if that measure is 140 characters.
+  assert.match(css, /\.primer-plain \{[^}]*max-width: var\(--measure\)/s, "long-form primer prose needs a readable measure");
+  assert.match(css, /--measure: 6[0-9]ch;/, "the shared measure must stay inside the readable 60-70 character range");
+  assert.doesNotMatch(css, /\.primer-plain \{[^}]*font-family/s, "primer prose is a paragraph, so it stays in the body face");
 });
 
 test("keeps personal information out of publishable source", async () => {

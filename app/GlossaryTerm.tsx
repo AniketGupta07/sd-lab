@@ -6,6 +6,16 @@ import type { GlossaryEntry } from "./content/types";
 
 const PANEL_WIDTH = 320;
 const VIEWPORT_MARGIN = 12;
+/** Enough of a guess to decide which side has room; exact height is unknown pre-paint. */
+const ESTIMATED_PANEL_HEIGHT = 160;
+
+type Anchor = {
+  top?: number;
+  bottom?: number;
+  left: number;
+  width: number;
+  flipped: boolean;
+};
 
 /**
  * A glossary term marked in place, with its definition one hover, focus or tap
@@ -26,7 +36,7 @@ const VIEWPORT_MARGIN = 12;
  * diagram labels that were being cut off by their viewBox.
  */
 export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; children: string }) {
-  const [anchor, setAnchor] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   /**
    * When the last pointer press happened, so focus can tell a Tab from a tap.
@@ -38,16 +48,31 @@ export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; ch
   const panelId = `glossary-${useId().replace(/:/g, "")}`;
   const open = anchor !== null;
 
-  const show = useCallback(() => {
+  /**
+   * Anchor the panel to the term, flipping above it when there is not enough
+   * room below. Without the flip, tapping a term near the bottom of a phone
+   * screen opened the definition entirely below the fold — the panel was
+   * technically open and completely unreadable.
+   */
+  const measure = useCallback((): Anchor | null => {
     const rect = trigger.current?.getBoundingClientRect();
-    if (!rect) return;
+    if (!rect) return null;
     const width = Math.min(PANEL_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
-    setAnchor({
-      top: rect.bottom,
+    const below = window.innerHeight - rect.bottom;
+    const flip = below < ESTIMATED_PANEL_HEIGHT && rect.top > below;
+    return {
+      top: flip ? undefined : rect.bottom,
+      bottom: flip ? window.innerHeight - rect.top : undefined,
       left: Math.max(VIEWPORT_MARGIN, Math.min(rect.left, window.innerWidth - width - VIEWPORT_MARGIN)),
       width,
-    });
+      flipped: flip,
+    };
   }, []);
+
+  const show = useCallback(() => {
+    const next = measure();
+    if (next) setAnchor(next);
+  }, [measure]);
 
   const hide = useCallback(() => setAnchor(null), []);
 
@@ -65,19 +90,12 @@ export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; ch
     const reposition = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const rect = trigger.current?.getBoundingClientRect();
-        if (!rect) return;
         // Deliberately no "close when off-screen" branch. Tabbing to a term
         // below the fold fires focus *before* the browser scrolls it into view,
         // so an off-screen test here sees stale coordinates and closes the
-        // panel it was meant to be following. The panel is anchored to the
-        // term; if the term is out of view the panel is too, which is correct.
-        const width = Math.min(PANEL_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
-        setAnchor({
-          top: rect.bottom,
-          left: Math.max(VIEWPORT_MARGIN, Math.min(rect.left, window.innerWidth - width - VIEWPORT_MARGIN)),
-          width,
-        });
+        // panel it was meant to be following.
+        const next = measure();
+        if (next) setAnchor(next);
       });
     };
     document.addEventListener("keydown", onKeyDown);
@@ -89,7 +107,7 @@ export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; ch
       window.removeEventListener("scroll", reposition, true);
       window.removeEventListener("resize", reposition);
     };
-  }, [open, hide]);
+  }, [open, hide, measure]);
 
   return (
     // Hover opens only for an actual mouse. A tap synthesises
@@ -122,7 +140,8 @@ export function GlossaryTermMark({ entry, children }: { entry: GlossaryEntry; ch
           className="glossary-pop"
           id={panelId}
           role="tooltip"
-          style={{ top: anchor.top, left: anchor.left, width: anchor.width }}
+          style={{ top: anchor.top, bottom: anchor.bottom, left: anchor.left, width: anchor.width }}
+          data-flipped={anchor.flipped || undefined}
         >
           <span className="glossary-pop-card">
             <strong>{entry.term}</strong>

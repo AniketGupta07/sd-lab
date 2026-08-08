@@ -34,7 +34,12 @@ type TopicStatus = "not-started" | "in-progress" | "completed";
 
 type TopicProgress = {
   status: TopicStatus;
-  confidence: number;
+  /**
+   * `null` until the learner actually picks a number. A numeric default made
+   * the app assert a self-rating nobody gave, and made "weak topics" unable to
+   * fire until someone actively downrated.
+   */
+  confidence: number | null;
   lastReviewedAt?: string;
   notes: string;
 };
@@ -75,6 +80,12 @@ type PracticeDraft = {
   secondsRemaining: number;
   fields: Record<PracticeField, string>;
   scores: Record<ScoreField, number>;
+  /**
+   * Reliability checklist, keyed by question id. It lives on the draft rather
+   * than in component state so it survives a reload and travels with the saved
+   * attempt — the ticks are part of the record of what you actually reviewed.
+   */
+  checklist: Record<string, boolean>;
   sketch: Stroke[];
 };
 
@@ -186,7 +197,12 @@ function SketchPad({
     if (!canvas || !context) return;
     context.clearRect(0, 0, SKETCH_WIDTH, SKETCH_HEIGHT);
     context.strokeStyle = ink;
-    context.lineWidth = 3;
+    // The canvas is a fixed 1600x900 bitmap scaled to fit its box, so a literal
+    // lineWidth of 3 rendered at 3 x (312/1600) = 0.58 CSS pixels on a phone:
+    // a hairline you cannot see, let alone draw a diagram with. The pen is
+    // specified in *rendered* pixels and converted back into bitmap units.
+    const rendered = canvas.getBoundingClientRect().width || SKETCH_WIDTH;
+    context.lineWidth = Math.max(3, 3 * (SKETCH_WIDTH / rendered));
     context.lineCap = "round";
     context.lineJoin = "round";
     for (const stroke of live ? [...all, live] : all) {
@@ -202,6 +218,14 @@ function SketchPad({
   }, [ink]);
 
   useEffect(() => { paint(strokes, drawingRef.current); }, [strokes, paint]);
+
+  // The pen width is derived from the rendered box, so a resize that changes
+  // that box has to redraw or the strokes keep the old device's weight.
+  useEffect(() => {
+    const repaint = () => paint(strokes, drawingRef.current);
+    window.addEventListener("resize", repaint);
+    return () => window.removeEventListener("resize", repaint);
+  }, [strokes, paint]);
 
   function pointFrom(event: ReactPointerEvent<HTMLCanvasElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -297,6 +321,10 @@ type StudyState = {
   activityDates: string[];
   theme: "light" | "dark";
   draft: PracticeDraft;
+  /** Estimation drill id -> the calculation the learner typed. */
+  drills: Record<string, string>;
+  /** The drawn mock, which stages have been ticked off, and every mock run. */
+  mock: { promptId: string; checks: Record<string, boolean>; log: Array<{ promptId: string; date: string }> };
   srs: Record<string, SrsCard>;
   /** Section id -> collapsed. Absent means "use the section's default". */
   collapsed: Record<string, boolean>;
@@ -307,25 +335,116 @@ type StudyState = {
  * order: mechanics first, the rest opened deliberately.
  */
 const topicSections = {
-  primer: { eyebrow: "Start here", title: "Explained from zero", defaultOpen: true },
-  mechanics: { eyebrow: "Mechanics", title: "What happens under the hood", defaultOpen: true },
+  primer: { eyebrow: "Start here", short: "Primer", title: "Explained from zero", defaultOpen: true },
+  mechanics: { eyebrow: "Mechanics", short: "Mechanics", title: "What happens under the hood", defaultOpen: true },
   // Closed, and below the mechanics rather than above them. Definitions now
   // reach the reader inline at the point of confusion, so the list no longer
   // has to be a wall of 28 entries between the primer and the actual content.
   // It stays because it is the one surface you can scan and self-test against.
-  glossary: { eyebrow: "Vocabulary", title: "Review every term in one place", defaultOpen: false },
+  glossary: { eyebrow: "Vocabulary", short: "Vocabulary", title: "Review every term in one place", defaultOpen: false },
   // Closed by default now that the primer sits above it: the top of the page
   // should be the explanation, not four open panels of compressed prose.
-  tradeoffs: { eyebrow: "Trade-offs", title: "Say these aloud", defaultOpen: false },
-  failures: { eyebrow: "Failure diagnosis", title: "How this breaks in production", defaultOpen: false },
-  questions: { eyebrow: "Pressure questions", title: "What an interviewer will push on", defaultOpen: false },
-  checklist: { eyebrow: "Decision discipline", title: "Before leaving this topic", defaultOpen: false },
-  quiz: { eyebrow: "Knowledge check", title: "Commit before revealing the reasoning", defaultOpen: false },
+  tradeoffs: { eyebrow: "Trade-offs", short: "Trade-offs", title: "Say these aloud", defaultOpen: false },
+  failures: { eyebrow: "Failure diagnosis", short: "Failures", title: "How this breaks in production", defaultOpen: false },
+  questions: { eyebrow: "Pressure questions", short: "Questions", title: "What an interviewer will push on", defaultOpen: false },
+  checklist: { eyebrow: "Decision discipline", short: "Checklist", title: "Before leaving this topic", defaultOpen: false },
+  quiz: { eyebrow: "Knowledge check", short: "Quiz", title: "Commit before revealing the reasoning", defaultOpen: false },
 } as const;
 
 type TopicSectionId = keyof typeof topicSections;
 
+/**
+ * Declaration order is render order on the module page, so the sub-rail can be
+ * driven straight off it and cannot drift out of sync with the sections.
+ */
+const topicSectionOrder = Object.keys(topicSections) as TopicSectionId[];
+
+/**
+ * The primer is the one section whose fold is remembered per module.
+ *
+ * `collapsed` is keyed by section id, which is right for the other seven: if
+ * you never want to see the quiz you never want to see any quiz. The primer is
+ * the opposite. The syllabus runs familiar → unfamiliar on purpose, so folding
+ * away the beginner explanation of week 1 estimation must not also fold away
+ * the one for week 11 LLM inference, which is the module you most need it on.
+ */
+function sectionStorageKey(id: TopicSectionId, topicId: string) {
+  return id === "primer" ? `primer:${topicId}` : id;
+}
+
+/** Whether a stored `collapsed` key is one this build still understands. */
+function isKnownSectionKey(key: string) {
+  return key in topicSections || (key.startsWith("primer:") && allTopics.some((topic) => topic.id === key.slice(7)));
+}
+
 const STORAGE_KEY = "ai-system-design-study:v1";
+/**
+ * Where "Reset everything" puts what it destroys. Written immediately before
+ * the removal, never read automatically — recovering is a deliberate act, so
+ * a reset still behaves like a reset on the next load.
+ */
+const BACKUP_KEY = `${STORAGE_KEY}:backup`;
+
+/**
+ * One module status, one spelling. The same value used to render as
+ * "Not started" on Today and "Not Started · 75 Min" on Curriculum, because two
+ * call sites hand-cased it and a third leaned on `text-transform: capitalize`,
+ * which also capitalised the unit beside it.
+ */
+function statusLabel(status: TopicProgress["status"]) {
+  return status === "completed" ? "Completed" : status === "in-progress" ? "In progress" : "Not started";
+}
+
+/**
+ * Horizontal strips that hide content off their right edge.
+ *
+ * On macOS the overlay scrollbar measures 0px, so a row hiding 59% of its items
+ * renders identically to one that fits: the last visible tile ends flush at the
+ * container edge and the row reads as complete. The prompt switcher hid six of
+ * eleven design rooms that way. This reports which edges have content beyond
+ * them so the CSS can fade exactly those, and nothing when everything fits.
+ *
+ * Deliberately re-subscribed on every render: these strips change their child
+ * count when the prompt category or the module changes, and a stale observer
+ * would report the previous row's geometry. Identical state is a no-op in
+ * React, so the measurement cannot loop.
+ */
+type FadeEdges = "none" | "start" | "end" | "both";
+
+function useOverflowFade<T extends HTMLElement>(): [React.RefObject<T | null>, FadeEdges] {
+  const ref = useRef<T>(null);
+  const [edges, setEdges] = useState<FadeEdges>("none");
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const overflow = element.scrollWidth - element.clientWidth;
+      // Sub-pixel layout rounding routinely leaves 1px of phantom overflow.
+      if (overflow <= 2) return setEdges("none");
+      const atStart = element.scrollLeft <= 2;
+      const atEnd = element.scrollLeft >= overflow - 2;
+      setEdges(atStart ? "end" : atEnd ? "start" : "both");
+    };
+    measure();
+    element.addEventListener("scroll", measure, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(element);
+    for (const child of Array.from(element.children)) observer?.observe(child);
+    return () => {
+      element.removeEventListener("scroll", measure);
+      observer?.disconnect();
+    };
+  });
+  return [ref, edges];
+}
+
+/** Keeps the selected tile of a scrolling strip on screen. */
+function scrollActiveIntoView(container: HTMLElement | null) {
+  const active = container?.querySelector<HTMLElement>("button.active, button[aria-current]");
+  if (!container || !active) return;
+  const left = active.offsetLeft - (container.clientWidth - active.offsetWidth) / 2;
+  container.scrollTo({ left: Math.max(0, left), behavior: "instant" as ScrollBehavior });
+}
 
 const gradeButtons: Array<{ id: RecallGrade; label: string; hint: string }> = [
   { id: "again", label: "Again", hint: "Could not recall" },
@@ -418,23 +537,41 @@ const practiceFields: Array<{
  * The design room is worked one interview phase at a time rather than as one
  * long scroll, so a timed attempt matches the clock the phases describe.
  * Sketch, reference, and scoring are their own steps at the end.
+ *
+ * The per-step budget is a *reference to* an interview phase, never a literal
+ * minute range: the steps sit directly beside a live countdown, and design
+ * prompts run 40 to 60 minutes, so a hardcoded "15–20" was silently wrong by up
+ * to 26 minutes on a long prompt. `phase` names the entry in `interviewPhases`
+ * whose share this step spends; `stepMinutes` turns that into a range against
+ * the prompt actually being attempted. The last two steps happen after the
+ * clock stops and therefore carry no phase.
  */
+const interviewPhaseShare = new Map(interviewPhases.map((phase) => [phase.id, phase.share]));
+
 const practiceSteps: Array<{
   id: string;
   label: string;
-  minutes: string;
+  phase?: string;
   fields: PracticeField[];
   kind?: "sketch" | "reference" | "score";
 }> = [
-  { id: "clarify", label: "Clarify", minutes: "3–5", fields: ["requirements", "assumptions"] },
-  { id: "estimate", label: "Estimate", minutes: "3–5", fields: ["estimation"] },
-  { id: "contract", label: "APIs + data", minutes: "3–5", fields: ["apis", "dataModel"] },
-  { id: "architecture", label: "Architecture", minutes: "5–7", fields: ["architecture"], kind: "sketch" },
-  { id: "deep-dive", label: "Deep dive", minutes: "15–20", fields: ["failureModes", "tradeoffs"] },
-  { id: "close", label: "Close", minutes: "≈5", fields: ["finalSummary"] },
-  { id: "compare", label: "Compare", minutes: "after", fields: [], kind: "reference" },
-  { id: "score", label: "Score", minutes: "after", fields: [], kind: "score" },
+  { id: "clarify", label: "Clarify", phase: "clarify", fields: ["requirements", "assumptions"] },
+  { id: "estimate", label: "Estimate", phase: "estimate", fields: ["estimation"] },
+  { id: "contract", label: "APIs + data", phase: "contract", fields: ["apis", "dataModel"] },
+  { id: "architecture", label: "Architecture", phase: "architecture", fields: ["architecture"], kind: "sketch" },
+  { id: "deep-dive", label: "Deep dive", phase: "deep-dive", fields: ["failureModes", "tradeoffs"] },
+  // The design room closes on a spoken summary; the phase it spends is the
+  // interview's reliability-and-evolution block.
+  { id: "close", label: "Close", phase: "reliability", fields: ["finalSummary"] },
+  { id: "compare", label: "Compare", fields: [], kind: "reference" },
+  { id: "score", label: "Score", fields: [], kind: "score" },
 ];
+
+/** "3–5" / "17–23" against this prompt's clock, or "after" once it has stopped. */
+function stepMinutes(step: { phase?: string }, totalMinutes: number) {
+  const share = step.phase ? interviewPhaseShare.get(step.phase) : undefined;
+  return share === undefined ? "after" : `${phaseMinutes(share, totalMinutes)}m`;
+}
 
 const scoreFields: Array<{ id: ScoreField; label: string }> = [
   { id: "requirements", label: "Requirements" },
@@ -457,6 +594,31 @@ const navItems: Array<{ id: View; index: string; label: string }> = [
   { id: "mock", index: "07", label: "Mock interview" },
   { id: "review", index: "08", label: "Notes & review" },
 ];
+
+/**
+ * Addressability.
+ *
+ * `view` used to be component state that never reached the URL, so the browser
+ * Back button left the site entirely, a reload dumped a mid-session learner
+ * back on Today, and a module could be neither bookmarked nor opened in a
+ * second tab. The fragment is the only address available here: the app is
+ * exported with `output: export` and served from a GitHub Pages basePath, where
+ * pushing a *path* would 404 on the next hard reload. Everything below is hash
+ * only, and every pushState call site passes a fragment-only relative URL so
+ * the path and basePath are left exactly as the server delivered them.
+ */
+function routeToHash(view: View, topicId: string, drillIndex: number) {
+  if (view === "topic") return `#/topic/${topicId}`;
+  if (view === "drills") return `#/drills/${estimationDrills[drillIndex]?.id ?? ""}`;
+  return `#/${view}`;
+}
+
+/** `#/topic/consistency-idempotency` -> `{ view: "topic", param: "consistency…" }`. */
+function parseRouteHash(hash: string): { view: View; param?: string } | null {
+  const [viewId, param] = hash.replace(/^#\/?/, "").split("/");
+  const match = navItems.find((item) => item.id === viewId);
+  return match ? { view: match.id, param: param || undefined } : null;
+}
 
 function emptyFields(): Record<PracticeField, string> {
   return {
@@ -494,6 +656,7 @@ function makeDraft(prompt: DesignPrompt, id = `draft-${prompt.id}`): PracticeDra
     secondsRemaining: prompt.durationMinutes * 60,
     fields: emptyFields(),
     scores: defaultScores(),
+    checklist: {},
     sketch: [],
   };
 }
@@ -504,7 +667,7 @@ function defaultState(): StudyState {
     topics: Object.fromEntries(
       allTopics.map((topic) => [
         topic.id,
-        { status: "not-started", confidence: 3, notes: "" },
+        { status: "not-started", confidence: null, notes: "" },
       ]),
     ),
     generalNotes: "",
@@ -513,6 +676,8 @@ function defaultState(): StudyState {
     activityDates: [],
     theme: "light",
     draft: makeDraft(designPrompts[0]),
+    drills: {},
+    mock: { promptId: designPrompts[0].id, checks: {}, log: [] },
     srs: {},
     collapsed: {},
   };
@@ -597,6 +762,17 @@ function normalizeScores(value: unknown): Record<ScoreField, number> {
   return scores;
 }
 
+/** Keeps only ticks for questions that still exist in the checklist. */
+function normalizeChecklist(value: unknown): Record<string, boolean> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, boolean> = {};
+  for (const question of standardQuestions) {
+    const key = String(question.id);
+    if (value[key] === true) result[key] = true;
+  }
+  return result;
+}
+
 function normalizeDraft(value: unknown): PracticeDraft {
   const raw = isRecord(value) ? value : {};
   const prompt = designPrompts.find((item) => item.id === raw.promptId) ?? designPrompts[0];
@@ -612,8 +788,46 @@ function normalizeDraft(value: unknown): PracticeDraft {
     secondsRemaining: seconds,
     fields: normalizeFields(raw.fields),
     scores: normalizeScores(raw.scores),
+    checklist: normalizeChecklist(raw.checklist),
     sketch: normalizeSketch(raw.sketch),
   };
+}
+
+/** Drops answers for drills that no longer exist and caps runaway payloads. */
+function normalizeDrills(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, string> = {};
+  for (const drill of estimationDrills) {
+    const answer = value[drill.id];
+    if (typeof answer === "string" && answer.length) result[drill.id] = answer.slice(0, 20_000);
+  }
+  return result;
+}
+
+function normalizeMock(value: unknown): StudyState["mock"] {
+  const raw = isRecord(value) ? value : {};
+  const prompt = designPrompts.find((item) => item.id === raw.promptId) ?? designPrompts[0];
+  const savedChecks = isRecord(raw.checks) ? raw.checks : {};
+  const checks: Record<string, boolean> = {};
+  for (const phase of interviewPhases) {
+    if (savedChecks[phase.id] === true) checks[phase.id] = true;
+  }
+  // Spoken mocks left no trace anywhere: nothing recorded that one had
+  // happened, so the surface the syllabus schedules three times could be run
+  // ten times and still read as untouched. Entries for prompts this build no
+  // longer ships are dropped like every other restored reference.
+  const log = Array.isArray(raw.log)
+    ? raw.log
+        .filter((entry): entry is { promptId: string; date: string } =>
+          isRecord(entry)
+          && typeof entry.promptId === "string"
+          && designPrompts.some((item) => item.id === entry.promptId)
+          && typeof entry.date === "string"
+          && /^\d{4}-\d{2}-\d{2}$/.test(entry.date))
+        .map((entry) => ({ promptId: entry.promptId, date: entry.date }))
+        .slice(0, 200)
+    : [];
+  return { promptId: prompt.id, checks, log };
 }
 
 /**
@@ -666,9 +880,10 @@ function mergeStoredState(raw: string): StudyState {
           const status = rawTopic.status === "in-progress" || rawTopic.status === "completed"
             ? rawTopic.status
             : "not-started";
+          // Absent stays absent: an unrated module must not come back rated.
           const confidence = typeof rawTopic.confidence === "number" && Number.isFinite(rawTopic.confidence)
             ? Math.max(1, Math.min(5, Math.round(rawTopic.confidence)))
-            : fallback.topics[topic.id].confidence;
+            : null;
           return [topic.id, {
             status,
             confidence,
@@ -697,11 +912,13 @@ function mergeStoredState(raw: string): StudyState {
         : [],
       theme: saved.theme === "dark" ? "dark" : "light",
       draft: normalizeDraft(saved.draft),
+      drills: normalizeDrills(saved.drills),
+      mock: normalizeMock(saved.mock),
       srs: normalizeSrs(saved.srs),
       collapsed: isRecord(saved.collapsed)
         ? Object.fromEntries(
             Object.entries(saved.collapsed).filter(
-              ([key, value]) => key in topicSections && typeof value === "boolean",
+              ([key, value]) => isKnownSectionKey(key) && typeof value === "boolean",
             ),
           ) as Record<string, boolean>
         : {},
@@ -726,6 +943,24 @@ function tomorrowPlus(days: number) {
   return localDateKey(date);
 }
 
+/**
+ * Feedback slots. The notice used to be a single string rendered in exactly one
+ * place, so seven of its nine call sites produced no visible acknowledgement at
+ * all. Naming the slot lets one piece of state stay one piece of state while
+ * still surfacing next to whichever control raised it.
+ */
+type NoticeSlot = "global" | "practice" | "mistake" | "danger" | "mock";
+type Notice = { slot: NoticeSlot; tone: "info" | "success" | "warn"; text: string };
+
+/** Human phrasing for the header's save badge. */
+function describeSavedAt(savedAt: number, now: number) {
+  const seconds = Math.max(0, Math.round((now - savedAt) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("dashboard");
   const [study, setStudy] = useState<StudyState>(defaultState);
@@ -733,13 +968,13 @@ export default function Home() {
   const [activeTopicId, setActiveTopicId] = useState(allTopics[0].id);
   const [topicWeek, setTopicWeek] = useState(1);
   const [activeDrillIndex, setActiveDrillIndex] = useState(0);
-  const [drillAnswer, setDrillAnswer] = useState("");
   const [drillRevealed, setDrillRevealed] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(designPrompts[0].durationMinutes * 60);
-  const [saveNotice, setSaveNotice] = useState("");
-  const [mockPrompt, setMockPrompt] = useState<DesignPrompt>(designPrompts[0]);
-  const [mockChecks, setMockChecks] = useState<Record<string, boolean>>({});
+  // One notice, but addressed: it names the slot it belongs to so it renders
+  // beside the control that produced it instead of in one unrelated savebar.
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [followUpsShown, setFollowUpsShown] = useState(false);
+  const [checklistOpen, setChecklistOpen] = useState(false);
   const [practiceCategory, setPracticeCategory] = useState<DesignCategory>("classic");
   const [referenceRevealed, setReferenceRevealed] = useState(false);
   const [practiceStep, setPracticeStep] = useState(practiceSteps[0].id);
@@ -755,6 +990,43 @@ export default function Home() {
     correctApproach: "",
     reviewDate: tomorrowPlus(7),
   });
+  // The header badge used to read "Saved locally" whether or not anything had
+  // been saved. These drive it from the write that actually happens: the badge
+  // is "saving" exactly while the current `study` object is not the one on disk.
+  const [persistedSnapshot, setPersistedSnapshot] = useState<StudyState | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [savedAgo, setSavedAgo] = useState("");
+  const mainRef = useRef<HTMLElement>(null);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  // Leaving a 7,551px module page to check one recall card used to cost you
+  // your place permanently, because every view switch scrolled to the top and
+  // threw the old offset away. One number per view, restored on the way back.
+  const scrollByView = useRef<Partial<Record<View, number>>>({});
+  const pendingScroll = useRef<number | null>(null);
+  // False until the address bar has been written once. The first write replaces
+  // rather than pushes, so the entry the user arrived on is not duplicated and
+  // one Back press still leaves the app rather than doing nothing.
+  const routeWritten = useRef(false);
+  // Switching views used to be silent and invisible to assistive tech: the DOM
+  // swapped under a focus that never moved and nothing was announced.
+  const [viewAnnouncement, setViewAnnouncement] = useState("");
+  // The countdown was an `aria-label` on a roleless <span>, which assistive tech
+  // discards outright. The digits now carry `role="timer"` and the spoken form
+  // goes through this, updated only at boundaries worth interrupting for.
+  const [timerAnnouncement, setTimerAnnouncement] = useState("");
+  // The JSON that "Reset everything" just threw away, held for the rest of the
+  // session so Undo is one click rather than a localStorage archaeology dig.
+  const [resetBackup, setResetBackup] = useState<string | null>(null);
+  // The three strips that still scroll after the module picker and drill tabs
+  // were made to wrap. Each reports its own hidden edges; the two that fit at
+  // a given width simply report "none" and render no fade.
+  const [promptStripRef, promptStripFade] = useOverflowFade<HTMLDivElement>();
+  const [stepStripRef, stepStripFade] = useOverflowFade<HTMLElement>();
+  const [subrailRef, subrailFade] = useOverflowFade<HTMLElement>();
+  // Wraps above 760px and scrolls below it, so it needs the fade only sometimes
+  // — which is exactly what the hook reports.
+  const [drillStripRef, drillStripFade] = useOverflowFade<HTMLDivElement>();
 
   useEffect(() => {
     const hydrationTimer = window.setTimeout(() => {
@@ -765,10 +1037,25 @@ export default function Home() {
       if (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches) next.theme = "dark";
       setStudy(next);
       if (restoredPrompt) setPracticeCategory(restoredPrompt.category);
-      if (nextTopic) {
-        setActiveTopicId(nextTopic.id);
-        setTopicWeek(nextTopic.week);
+      // A bookmarked or reloaded address outranks "wherever you left off": the
+      // learner asked for that module by name.
+      const route = parseRouteHash(window.location.hash);
+      const routedTopic = route?.view === "topic" && route.param
+        ? allTopics.find((topic) => topic.id === route.param)
+        : undefined;
+      const landingTopic = routedTopic ?? nextTopic;
+      if (landingTopic) {
+        setActiveTopicId(landingTopic.id);
+        setTopicWeek(landingTopic.week);
       }
+      if (route?.view === "drills" && route.param) {
+        const index = estimationDrills.findIndex((drill) => drill.id === route.param);
+        if (index !== -1) setActiveDrillIndex(index);
+      }
+      if (route) setView(route.view);
+      // We restore scroll per view ourselves; letting the browser also restore
+      // an offset from before the client render means two answers and a jump.
+      if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
       setSecondsLeft(
         next.draft.deadline
           ? Math.max(0, Math.ceil((next.draft.deadline - Date.now()) / 1000))
@@ -807,24 +1094,55 @@ export default function Home() {
     const timeout = window.setTimeout(() => {
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(study));
+        // Recording *which* object landed is what lets the badge tell "saving"
+        // from "saved" without a second source of truth to drift out of sync.
+        setPersistedSnapshot(study);
+        setLastSavedAt(Date.now());
+        setSaveFailed(false);
       } catch {
-        setSaveNotice("This browser could not save your changes. Copy important notes before leaving.");
+        setSaveFailed(true);
+        setNotice({
+          slot: "global",
+          tone: "warn",
+          text: "This browser could not save your changes. Copy important notes before leaving.",
+        });
       }
     }, 250);
     return () => window.clearTimeout(timeout);
   }, [hydrated, study]);
+
+  // "Saved · 2m ago" has to keep being true, so the phrasing re-derives on a
+  // slow tick rather than freezing at whatever it said when the write landed.
+  useEffect(() => {
+    if (lastSavedAt === null) return;
+    const update = () => setSavedAgo(describeSavedAt(lastSavedAt, Date.now()));
+    update();
+    const interval = window.setInterval(update, 20_000);
+    return () => window.clearInterval(interval);
+  }, [lastSavedAt]);
 
   useEffect(() => {
     if (!study.draft.deadline) return;
     const tick = () => {
       const remaining = Math.max(0, Math.ceil((study.draft.deadline! - Date.now()) / 1000));
       setSecondsLeft(remaining);
+      // A digit that changes every second is noise to a screen reader if it is
+      // announced, and invisible if it is not. Announce the boundaries a person
+      // actually paces against: every five minutes, then every fifteen seconds
+      // through the last minute, then zero.
+      if (remaining === 0) setTimerAnnouncement("Time is up. The design clock has reached zero.");
+      else if (remaining <= 60 && remaining % 15 === 0) setTimerAnnouncement(`${remaining} seconds remaining.`);
+      else if (remaining % 300 === 0) setTimerAnnouncement(`${remaining / 60} minutes remaining.`);
       if (remaining === 0) {
         setStudy((current) => ({
           ...current,
           draft: { ...current.draft, deadline: null, secondsRemaining: 0 },
         }));
-        setSaveNotice("Time. Take two minutes to summarize your design and record the three biggest mistakes.");
+        setNotice({
+          slot: "practice",
+          tone: "warn",
+          text: "Time. Take two minutes to summarize your design and record the three biggest mistakes.",
+        });
       }
     };
     tick();
@@ -847,10 +1165,54 @@ export default function Home() {
   const activeTopic = allTopics.find((topic) => topic.id === activeTopicId) ?? allTopics[0];
   const visibleTopicWeek = allTopics.filter((topic) => topic.week === topicWeek);
   const activeDrill = estimationDrills[activeDrillIndex];
+  // Both read straight out of the persisted object: the drill answer and the
+  // mock's stage ticks used to be component state that a reload discarded.
+  const drillAnswer = study.drills[activeDrill.id] ?? "";
+  const mockPrompt = designPrompts.find((prompt) => prompt.id === study.mock.promptId) ?? designPrompts[0];
+  const mockChecked = interviewPhases.filter((phase) => study.mock.checks[phase.id]).length;
+  const mockLogTitle = study.mock.log.length
+    ? designPrompts.find((prompt) => prompt.id === study.mock.log[0].promptId)?.title ?? "a drawn prompt"
+    : "";
   const activePrompt = designPrompts.find((prompt) => prompt.id === study.draft.promptId) ?? designPrompts[0];
   const visiblePrompts = designPrompts.filter((prompt) => prompt.category === practiceCategory);
   const activeStep = practiceSteps.find((step) => step.id === practiceStep) ?? practiceSteps[0];
+  /**
+   * Whether the header carries the attempt clock. "expired" survives a reload
+   * (`deadline` is cleared at zero but `startedAt` is not), which is exactly the
+   * case that used to be silent: a finished 40-minute attempt with no trace of
+   * itself anywhere outside the design room.
+   */
+  const timerChipState: "off" | "running" | "expired" =
+    view === "practice"
+      ? "off"
+      : study.draft.deadline
+        ? "running"
+        : secondsLeft === 0 && study.draft.startedAt ? "expired" : "off";
+  const saveState: "idle" | "saving" | "saved" | "failed" = saveFailed
+    ? "failed"
+    : !hydrated
+      ? "idle"
+      : persistedSnapshot === study ? "saved" : "saving";
+  // In seeded week 3 the module Today sends you to was off the right edge of a
+  // strip with no scrollbar. Whatever is selected has to be visible, on arrival
+  // and after every switch.
+  useEffect(() => {
+    if (view !== "practice") return;
+    scrollActiveIntoView(promptStripRef.current);
+  }, [view, practiceCategory, study.draft.promptId, promptStripRef]);
+
+  useEffect(() => {
+    if (view !== "practice") return;
+    scrollActiveIntoView(stepStripRef.current);
+  }, [view, practiceStep, stepStripRef]);
+
+  useEffect(() => {
+    if (view !== "drills") return;
+    scrollActiveIntoView(drillStripRef.current);
+  }, [view, activeDrillIndex, drillStripRef]);
+
   const unresolvedMistakes = study.mistakes.filter((mistake) => !mistake.resolved);
+  const checklistTicked =standardQuestions.filter((question) => study.draft.checklist[String(question.id)]).length;
 
   /**
    * Cards are due when scheduled on or before today. Unseen cards only enter the
@@ -881,6 +1243,23 @@ export default function Home() {
     .filter((card) => !sessionSeen.includes(card.key));
   const activeCard = recallQueue[0];
 
+  /**
+   * Reveal used to be `setRecallRevealed(true)` and nothing else, which put the
+   * model answer at y=871 and the grade buttons at y=1046 on a 900px screen:
+   * pressing space produced an answer you could not see. The answer now comes
+   * to the reader. `scroll-margin-bottom` on `.recall-answer` keeps it clear of
+   * the pinned grade row, and `instant` because the global smooth scroll would
+   * otherwise animate it.
+   */
+  function revealAnswer() {
+    setRecallRevealed(true);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.querySelector(".recall-answer")?.scrollIntoView({ behavior: "instant", block: "nearest" });
+      });
+    });
+  }
+
   // Spaced repetition is a keyboard workflow: space reveals, 1-4 grade. Bound
   // only while the recall view is showing a card, and never while typing.
   useEffect(() => {
@@ -888,11 +1267,19 @@ export default function Home() {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
-      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+      // Never while typing. `closest` rather than tagName: the event target of a
+      // keypress inside a control can be a descendant of it.
+      if (target?.isContentEditable || target?.closest("input, textarea, select")) return;
+      // Space and Enter already belong to whatever control has focus, and
+      // preventDefault() on keydown cancels the browser's synthesized click. A
+      // guard that missed BUTTON therefore turned every focused control on the
+      // page into a dead key — the sidebar included, which is a keyboard trap.
+      // 1-4 are not activation keys, so they stay live everywhere but text fields.
+      const onControl = Boolean(target?.closest('button, a, summary, [role="button"]'));
 
-      if (!recallRevealed && (event.key === " " || event.key === "Enter")) {
+      if (!recallRevealed && !onControl && (event.key === " " || event.key === "Enter")) {
         event.preventDefault();
-        setRecallRevealed(true);
+        revealAnswer();
         return;
       }
       if (recallRevealed) {
@@ -906,15 +1293,100 @@ export default function Home() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [view, activeCard, recallRevealed]);
+  // Only a rating the learner actually gave can flag a topic as weak.
   const weakTopics = allTopics.filter((topic) => {
     const progress = study.topics[topic.id];
-    return progress?.confidence <= 2 && progress.status !== "completed";
+    if (!progress || progress.confidence === null) return false;
+    return progress.confidence <= 2 && progress.status !== "completed";
   });
+  const ratedTopicCount = allTopics.filter((topic) => study.topics[topic.id]?.confidence !== null).length;
 
   function selectView(next: View) {
-    setView(next);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (next === view) {
+      // Re-pressing the tab you are already on means "take me back to the top",
+      // which is the one case where the old unconditional scroll was right.
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else {
+      scrollByView.current[view] = window.scrollY;
+      pendingScroll.current = scrollByView.current[next] ?? 0;
+      setView(next);
+    }
+    // The mistake form is rendered on two views, so a notice left behind on one
+    // would greet you on the other. Callers that want a notice on arrival set
+    // it after this returns.
+    setNotice(null);
+    // Name the destination for a screen reader, then put the reading cursor at
+    // the top of it so reaching content does not mean tabbing the whole nav.
+    setViewAnnouncement(`${navItems.find((item) => item.id === next)?.label ?? "View"} — loaded`);
+    mainRef.current?.focus({ preventScroll: true });
   }
+
+  // Put the view back where the learner left it. Runs after the new view has
+  // committed, so the document is already tall enough to hold the old offset.
+  useEffect(() => {
+    const target = pendingScroll.current;
+    pendingScroll.current = null;
+    if (target === null) return;
+    // "instant", not "auto": `auto` defers to `html { scroll-behavior: smooth }`
+    // at globals.css:89, which animated a 4,000px restore and landed the learner
+    // somewhere mid-flight (measured 3,629px of an intended 4,000px). Returning
+    // to a page should be instantaneous, the way a real back navigation is.
+    window.scrollTo({ top: target, behavior: "instant" });
+  }, [view]);
+
+  const routeHash = routeToHash(view, activeTopicId, activeDrillIndex);
+
+  /** Back, Forward, a pasted link, or a hand-edited fragment all land here. */
+  function applyRoute(hash: string) {
+    const route = parseRouteHash(hash);
+    if (!route) return;
+    if (route.view === "topic" && route.param) {
+      const topic = allTopics.find((item) => item.id === route.param);
+      if (topic && topic.id !== activeTopicId) {
+        setTopicWeek(topic.week);
+        setActiveTopicId(topic.id);
+        delete scrollByView.current.topic;
+      }
+    }
+    if (route.view === "drills" && route.param) {
+      const index = estimationDrills.findIndex((drill) => drill.id === route.param);
+      if (index !== -1 && index !== activeDrillIndex) {
+        setActiveDrillIndex(index);
+        setDrillRevealed(false);
+      }
+    }
+    selectView(route.view);
+  }
+
+  // Deliberately no dependency array: `applyRoute` closes over the current
+  // view, topic and drill, and a stale closure here would send Back to the
+  // wrong place. Re-binding one listener per render is cheaper than the bug.
+  useEffect(() => {
+    if (!hydrated) return;
+    const onHashChange = () => applyRoute(window.location.hash);
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  });
+
+  // Write side. `pushState` never fires `hashchange`, so this cannot loop with
+  // the listener above; and when a Back press moved us, the hash already
+  // matches and nothing is pushed.
+  useEffect(() => {
+    if (!hydrated) return;
+    const shouldReplace = !routeWritten.current;
+    routeWritten.current = true;
+    if (window.location.hash === routeHash) return;
+    if (shouldReplace) window.history.replaceState(null, "", routeHash);
+    else window.history.pushState(null, "", routeHash);
+  }, [hydrated, routeHash]);
+
+  // The active pill can start off the right edge of the horizontally scrolling
+  // mobile nav, so the user lands on a new view with no tab highlighted.
+  useEffect(() => {
+    const active = mobileNavRef.current?.querySelector("button.active");
+    if (!active || !mobileNavRef.current?.offsetParent) return;
+    active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+  }, [view]);
 
   function updateTopic(topicId: string, patch: Partial<TopicProgress>) {
     setStudy((current) => {
@@ -938,14 +1410,28 @@ export default function Home() {
   function openTopic(topicId: string) {
     const topic = allTopics.find((item) => item.id === topicId);
     if (topic) setTopicWeek(topic.week);
+    // A different module is a different page: restoring the offset you had in
+    // the last one would drop you into the middle of this one's primer.
+    if (topicId !== activeTopicId) {
+      delete scrollByView.current.topic;
+      // Taking "next module" from the terminal block at y≈8,565 is a page
+      // change, not a jump within one, so it lands at the top immediately
+      // instead of animating 8,500px through the module you just finished.
+      if (view === "topic") window.scrollTo({ top: 0, behavior: "instant" });
+    }
     setActiveTopicId(topicId);
     selectView("topic");
   }
 
+  // Switching tabs must not erase a calculation. Each drill keeps its own
+  // answer in the persisted object, so the tab strip restores rather than wipes.
   function chooseDrill(index: number) {
     setActiveDrillIndex(index);
-    setDrillAnswer("");
     setDrillRevealed(false);
+  }
+
+  function updateDrillAnswer(drillId: string, value: string) {
+    setStudy((current) => ({ ...current, drills: { ...current.drills, [drillId]: value } }));
   }
 
   function choosePractice(prompt: DesignPrompt, fresh = true) {
@@ -956,7 +1442,6 @@ export default function Home() {
       draft: fresh ? makeDraft(prompt, newId("attempt")) : current.draft,
     }));
     setSecondsLeft(prompt.durationMinutes * 60);
-    setSaveNotice("");
     selectView("practice");
   }
 
@@ -988,14 +1473,37 @@ export default function Home() {
   }
 
   function isSectionOpen(id: TopicSectionId) {
-    return study.collapsed[id] === undefined ? topicSections[id].defaultOpen : !study.collapsed[id];
+    const stored = study.collapsed[sectionStorageKey(id, activeTopicId)];
+    if (stored !== undefined) return !stored;
+    // The primer is half of every module page and it opened expanded on all 53,
+    // including the ones the learner has already worked through. Open it while
+    // the module is untouched — which is exactly when "explained from zero" is
+    // what you came for — and fold it once the module is under way.
+    if (id === "primer") return (study.topics[activeTopicId]?.status ?? "not-started") === "not-started";
+    return topicSections[id].defaultOpen;
   }
 
   function toggleSection(id: TopicSectionId) {
+    const open = isSectionOpen(id);
     setStudy((current) => ({
       ...current,
-      collapsed: { ...current.collapsed, [id]: isSectionOpen(id) },
+      collapsed: { ...current.collapsed, [sectionStorageKey(id, activeTopicId)]: open },
     }));
+  }
+
+  /**
+   * Sub-rail target: open the section if it is folded, then put its heading
+   * under the sticky chrome. Two frames because the scroll has to happen after
+   * React has committed the newly expanded body, and `instant` because
+   * `html { scroll-behavior: smooth }` would otherwise animate the jump.
+   */
+  function jumpToSection(id: TopicSectionId) {
+    if (!isSectionOpen(id)) toggleSection(id);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(`topic-section-${id}`)?.scrollIntoView({ behavior: "instant", block: "start" });
+      });
+    });
   }
 
   /** Disclosure wrapper: header always visible, body folded away when closed. */
@@ -1015,7 +1523,7 @@ export default function Home() {
     const open = isSectionOpen(id);
     const meta = topicSections[id];
     return (
-      <article className={`paper-panel topic-wide topic-section ${className}`.trim()} data-open={open}>
+      <article id={`topic-section-${id}`} className={`paper-panel topic-wide topic-section ${className}`.trim()} data-open={open}>
         <button
           className="section-toggle"
           onClick={() => toggleSection(id)}
@@ -1061,6 +1569,11 @@ export default function Home() {
   }
 
   function toggleTimer() {
+    // At zero this used to compute `deadline = now + 0`, which re-fired the
+    // expiry handler on the same tick: the button said "Resume" and did
+    // nothing, forever. Zero is a distinct state — the only thing left to do
+    // with the clock is start a new attempt's worth of it.
+    const startFrom = secondsLeft > 0 ? secondsLeft : activePrompt.durationMinutes * 60;
     setStudy((current) => {
       if (current.draft.deadline) {
         return {
@@ -1072,22 +1585,35 @@ export default function Home() {
         ...current,
         draft: {
           ...current.draft,
-          deadline: Date.now() + secondsLeft * 1000,
-          secondsRemaining: secondsLeft,
+          deadline: Date.now() + startFrom * 1000,
+          secondsRemaining: startFrom,
           startedAt: current.draft.startedAt || new Date().toISOString(),
         },
         activityDates: addActivity(current.activityDates),
       };
     });
+    if (!study.draft.deadline) {
+      setSecondsLeft(startFrom);
+      // The expiry warning describes a clock that is no longer at zero.
+      setNotice((current) => (current?.slot === "practice" && current.tone === "warn" ? null : current));
+    }
   }
 
   function resetTimer() {
+    // Reset sits one button away from Pause and used to throw a running attempt
+    // away in silence. Only a *running* clock is worth a confirm; resetting an
+    // idle or finished one costs nothing.
+    if (study.draft.deadline && !window.confirm("Discard the running clock and reset it to the full attempt length?")) return;
     const seconds = activePrompt.durationMinutes * 60;
     setSecondsLeft(seconds);
     setStudy((current) => ({
       ...current,
       draft: { ...current.draft, deadline: null, secondsRemaining: seconds },
     }));
+    setTimerAnnouncement("");
+    // "Time. Take two minutes to summarize…" must not outlive the clock it
+    // describes: after a reset there is a full attempt on the board again.
+    setNotice((current) => (current?.slot === "practice" ? null : current));
   }
 
   function updateDraftField(field: PracticeField, value: string) {
@@ -1113,13 +1639,18 @@ export default function Home() {
       savedAt: now,
       durationMinutes: Math.max(1, Math.round(activePrompt.durationMinutes - secondsLeft / 60)),
     };
+    const kept = study.attempts.filter((item) => item.id !== attempt.id);
     setStudy((current) => ({
       ...current,
       attempts: [attempt, ...current.attempts.filter((item) => item.id !== attempt.id)],
       activityDates: addActivity(current.activityDates),
       draft: { ...current.draft, deadline: null, secondsRemaining: secondsLeft },
     }));
-    setSaveNotice("Attempt saved. Your dashboard and review history are up to date.");
+    setNotice({
+      slot: "practice",
+      tone: "success",
+      text: `Attempt saved — ${kept.length + 1} on record. Your dashboard and review history are up to date.`,
+    });
   }
 
   function reopenAttempt(attempt: SavedAttempt) {
@@ -1128,20 +1659,28 @@ export default function Home() {
     setSecondsLeft(attempt.secondsRemaining);
     setPracticeCategory(prompt.category);
     setReferenceRevealed(false);
-    setSaveNotice("Saved attempt reopened. Editing it will not replace the saved copy until you save again.");
     selectView("practice");
+    setNotice({
+      slot: "practice",
+      tone: "info",
+      text: "Saved attempt reopened. Editing it will not replace the saved copy until you save again.",
+    });
   }
 
   function addMistake() {
     if (!mistakeForm.mistake.trim() || !mistakeForm.correctApproach.trim()) {
-      setSaveNotice("Add both the mistake and the corrected approach.");
+      setNotice({ slot: "mistake", tone: "warn", text: "Add both the mistake and the corrected approach." });
       return;
     }
     const linkedCount = study.mistakes.filter(
       (item) => item.designProblemId === activePrompt.id && item.date === localDateKey(),
     ).length;
     if (view === "practice" && linkedCount >= 3) {
-      setSaveNotice("Keep the log focused: choose only the three highest-leverage mistakes from this attempt.");
+      setNotice({
+        slot: "mistake",
+        tone: "warn",
+        text: "Keep the log focused: choose only the three highest-leverage mistakes from this attempt.",
+      });
       return;
     }
     const mistake: Mistake = {
@@ -1165,7 +1704,13 @@ export default function Home() {
       correctApproach: "",
       reviewDate: tomorrowPlus(7),
     });
-    setSaveNotice("Mistake added to the review queue.");
+    // The queue table sits below the fold, so the count comes to the button
+    // rather than the user having to scroll to find out anything happened.
+    setNotice({
+      slot: "mistake",
+      tone: "success",
+      text: `Added — ${unresolvedMistakes.length + 1} unresolved in the review queue.`,
+    });
   }
 
   function toggleMistake(id: string) {
@@ -1179,12 +1724,63 @@ export default function Home() {
 
   function randomizeMock() {
     const next = designPrompts[Math.floor(Math.random() * designPrompts.length)];
-    setMockPrompt(next);
-    setMockChecks({});
+    setStudy((current) => ({ ...current, mock: { ...current.mock, promptId: next.id, checks: {} } }));
+    setFollowUpsShown(false);
   }
 
+  /**
+   * The one thing the mock room never did: record that a mock happened. Without
+   * it the stage ticks were a to-do list that erased itself on the next draw,
+   * and nothing on Today or in the streak knew a spoken attempt had been run.
+   */
+  function logMock() {
+    setStudy((current) => ({
+      ...current,
+      mock: {
+        ...current.mock,
+        checks: {},
+        log: [{ promptId: current.mock.promptId, date: localDateKey() }, ...current.mock.log].slice(0, 200),
+      },
+      activityDates: addActivity(current.activityDates),
+    }));
+    setFollowUpsShown(false);
+    setNotice({
+      slot: "mock",
+      tone: "success",
+      text: `Logged — ${study.mock.log.length + 1} spoken mock${study.mock.log.length === 0 ? "" : "s"} on record. The stage checklist is clear for the next one.`,
+    });
+  }
+
+  function toggleMockPhase(phaseId: string, checked: boolean) {
+    setStudy((current) => ({
+      ...current,
+      mock: { ...current.mock, checks: { ...current.mock.checks, [phaseId]: checked } },
+    }));
+  }
+
+  function toggleChecklistQuestion(questionId: string, checked: boolean) {
+    setStudy((current) => ({
+      ...current,
+      draft: { ...current.draft, checklist: { ...current.draft.checklist, [questionId]: checked } },
+    }));
+  }
+
+  /**
+   * Twelve weeks of notes, attempts and mistakes used to end at one misclick
+   * plus one Enter, with no snapshot anywhere. localStorage is the only store
+   * here, so the destructive path now leaves two ways back: a copy under the
+   * backup key that outlives the reset, and an in-page Undo for this session.
+   */
   function resetProgress() {
     if (!window.confirm("Reset all locally saved progress, notes, attempts, and mistakes for this site?")) return;
+    const snapshot = JSON.stringify(study);
+    try {
+      window.localStorage.setItem(BACKUP_KEY, snapshot);
+    } catch {
+      // A full quota must not turn "reset with a backup" into "reset without
+      // one" silently; the notice below says which of the two happened.
+    }
+    setResetBackup(snapshot);
     window.localStorage.removeItem(STORAGE_KEY);
     const fresh = defaultState();
     fresh.theme = study.theme;
@@ -1195,7 +1791,124 @@ export default function Home() {
     setQuizAnswers({});
     setSessionSeen([]);
     setRecallRevealed(false);
-    setSaveNotice("Local study data reset.");
+    setChecklistOpen(false);
+    setNotice(null);
+  }
+
+  function undoReset() {
+    if (!resetBackup) return;
+    const restored = mergeStoredState(resetBackup);
+    const prompt = designPrompts.find((item) => item.id === restored.draft.promptId) ?? designPrompts[0];
+    setStudy(restored);
+    setSecondsLeft(
+      restored.draft.deadline
+        ? Math.max(0, Math.ceil((restored.draft.deadline - Date.now()) / 1000))
+        : restored.draft.secondsRemaining,
+    );
+    setPracticeCategory(prompt.category);
+    setResetBackup(null);
+    window.localStorage.removeItem(BACKUP_KEY);
+    setNotice({
+      slot: "danger",
+      tone: "success",
+      text: `Restored — ${restored.mistakes.length} mistake${restored.mistakes.length === 1 ? "" : "s"}, ${restored.attempts.length} attempt${restored.attempts.length === 1 ? "" : "s"}, and every module's progress are back.`,
+    });
+  }
+
+  /**
+   * The cheap half of the safety net, and the only one that survives clearing
+   * the browser: the whole store as a file the learner keeps.
+   */
+  function exportProgress() {
+    const payload = JSON.stringify(study, null, 2);
+    const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `system-design-lab-${localDateKey()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setNotice({
+      slot: "danger",
+      tone: "success",
+      text: `Downloaded system-design-lab-${localDateKey()}.json — ${Math.round(payload.length / 1024)} KB covering every module, attempt, and mistake.`,
+    });
+  }
+
+  /**
+   * The inline acknowledgement for one slot. Always rendered as a live region so
+   * the message reaches assistive tech even when the slot is empty on arrival.
+   */
+  function renderNotice(slot: NoticeSlot) {
+    const shown = notice?.slot === slot ? notice : null;
+    return (
+      <p
+        className={`inline-notice${shown ? ` is-shown tone-${shown.tone}` : ""}`}
+        data-slot={slot}
+        role="status"
+        aria-live="polite"
+      >
+        {shown ? shown.text : ""}
+      </p>
+    );
+  }
+
+  /**
+   * The four dashboard metrics. A zero used to render as a 37px numeral with no
+   * explanation and nowhere to go, three of them unactionable by construction on
+   * day one — so each tile carries the meaning of its empty state and a route in.
+   */
+  function metricTiles(firstTopicId: string) {
+    type Tile = {
+      /** Zero-padded, like every other index in the app. These four were the
+       *  only A–D sequence in a product that numbers 01–08 nav items, 01–03
+       *  ledger rows, W01–W12 weeks and M1–M4 modules. */
+      index: string;
+      value: number;
+      label: string;
+      emptyLabel: string;
+      action?: { label: string; run: () => void };
+      emptyAction?: { label: string; run: () => void };
+    };
+    const tiles: Tile[] = [
+      {
+        index: "01",
+        value: streak,
+        label: "day study streak",
+        emptyLabel: "Streak starts with your first completed module",
+        emptyAction: { label: "Open the next module", run: () => openTopic(firstTopicId) },
+      },
+      {
+        index: "02",
+        value: dueCards.length,
+        label: "cards due for recall",
+        emptyLabel: "Recall unlocks once a module is started",
+        action: { label: "Start review", run: () => startRecall("due") },
+        emptyAction: { label: "Start a module", run: () => openTopic(firstTopicId) },
+      },
+      {
+        index: "03",
+        value: unresolvedMistakes.length,
+        label: "mistakes to review",
+        emptyLabel: "Mistake log is empty",
+        action: { label: "Open the log", run: () => selectView("review") },
+        emptyAction: { label: "Open the log", run: () => selectView("review") },
+      },
+      {
+        index: "04",
+        value: weakTopics.length,
+        label: "weak topics flagged",
+        // "Nothing rated 1 or 2" would be a lie once a low-rated module is
+        // finished, since finishing it takes it out of the flag.
+        emptyLabel: ratedTopicCount
+          ? `Nothing flagged · ${ratedTopicCount} module${ratedTopicCount === 1 ? "" : "s"} rated`
+          : "No module rated yet",
+        action: { label: "Review them", run: () => openTopic(weakTopics[0]?.id ?? firstTopicId) },
+        emptyAction: { label: "Rate a module", run: () => openTopic(firstTopicId) },
+      },
+    ];
+    return tiles;
   }
 
   function renderDashboard() {
@@ -1213,21 +1926,33 @@ export default function Home() {
     const nextPrompt = nextPromptPool[study.attempts.length % nextPromptPool.length] ?? designPrompts[0];
     const dueMinutes = dueTopics.reduce((sum, topic) => sum + topic.estimatedMinutes, 0);
     const latestAttempt = study.attempts[0];
+    // Mock interview had no inbound link from anywhere, while the syllabus
+    // schedules spoken mocks in weeks 7, 10 and 12. Read that off the modules
+    // themselves rather than hardcoding a week ladder that the re-pacing to
+    // twelve weeks would silently invalidate again.
+    const mockModules = currentWeekTopics.filter((topic) => topic.id.startsWith("mock-"));
+    const mockModulesLeft = mockModules.filter((topic) => study.topics[topic.id]?.status !== "completed");
     return (
       <>
+        {/* This opened with a hardcoded headline and a lede that read the same
+            on day 1 and day 365, and put the actual to-do list 82% below the
+            fold. The masthead is now the state the learner came to check, and
+            the second button moved out: the practice ticket below fires the
+            identical action from 600px closer to the thing it describes. */}
         <section className="hero-grid" aria-labelledby="dashboard-title">
           <div className="hero-copy">
-            <p className="eyebrow">Week {String(currentWeek.week).padStart(2, "0")} · Tier {currentWeek.tier}</p>
-            <h1 id="dashboard-title">Turn technical depth into interview signal.</h1>
+            <h1 id="dashboard-title">
+              Week {currentWeek.week} · {completedWeekTopics} of {currentWeekTopics.length} modules
+              {dueCards.length > 0 ? ` · ${dueCards.length} cards due` : ""}
+            </h1>
             <p className="hero-lede">
-              {currentWeek.focus} Build the habit of stating assumptions aloud and defending every trade-off.
+              {dueTopics.length > 0
+                ? <>Next up: <strong>{dueTopics[0].title}</strong> · {dueTopics[0].estimatedMinutes} min</>
+                : <>Week {currentWeek.week} is complete. Consolidate it with a timed design.</>}
             </p>
             <div className="hero-actions">
               <button className="button primary" onClick={() => openTopic(dueTopics[0]?.id ?? currentWeekTopics[0].id)}>
-                Start today&apos;s study
-              </button>
-              <button className="button quiet" onClick={() => choosePractice(nextPrompt)}>
-                Run a 40-min design
+                {dueTopics.length > 0 ? "Start today's study" : "Reopen this week"}
               </button>
             </div>
           </div>
@@ -1242,27 +1967,23 @@ export default function Home() {
         </section>
 
         <section className="metric-strip" aria-label="Study status">
-          <article>
-            <span className="metric-index">A</span>
-            <strong>{streak}</strong>
-            <p>day study streak</p>
-          </article>
-          <article className={dueCards.length > 0 ? "metric-actionable" : undefined}>
-            <span className="metric-index">B</span>
-            <strong>{dueCards.length}</strong>
-            <p>cards due for recall</p>
-            {dueCards.length > 0 ? <button className="metric-action" onClick={() => startRecall("due")}>Start review →</button> : null}
-          </article>
-          <article>
-            <span className="metric-index">C</span>
-            <strong>{unresolvedMistakes.length}</strong>
-            <p>mistakes to review</p>
-          </article>
-          <article>
-            <span className="metric-index">D</span>
-            <strong>{weakTopics.length}</strong>
-            <p>weak topics flagged</p>
-          </article>
+          {metricTiles(dueTopics[0]?.id ?? currentWeekTopics[0].id).map((tile) => {
+            const filled = tile.value > 0;
+            // A zero here is not a number the user can act on, it is a state
+            // with a way out. Both get the affordance the one live metric had.
+            const action = filled ? tile.action : tile.emptyAction;
+            return (
+              <article
+                key={tile.index}
+                className={filled ? (action ? "metric-actionable" : undefined) : "metric-empty"}
+              >
+                <span className="metric-index">{tile.index}</span>
+                {filled ? <strong>{tile.value}</strong> : null}
+                <p>{filled ? tile.label : tile.emptyLabel}</p>
+                {action ? <button className="metric-action" onClick={action.run}>{action.label} →</button> : null}
+              </article>
+            );
+          })}
         </section>
 
         <div className="dashboard-grid">
@@ -1289,7 +2010,7 @@ export default function Home() {
                     <span>Week {topic.week} · Module {topic.day} · {topic.estimatedMinutes} min</span>
                   </button>
                   <span className={`status-mark ${study.topics[topic.id]?.status}`}>
-                    {study.topics[topic.id]?.status === "in-progress" ? "In progress" : "Not started"}
+                    {statusLabel(study.topics[topic.id]?.status ?? "not-started")}
                   </span>
                 </article>
               )) : (
@@ -1308,8 +2029,45 @@ export default function Home() {
             <div className="ticket-meta">
               <span>{nextPrompt.category}</span><span>{nextPrompt.difficulty}</span><span>{nextPrompt.durationMinutes} min</span>
             </div>
-            <button className="button light" onClick={() => choosePractice(nextPrompt)}>Open practice room</button>
+            <div className="ticket-actions">
+              <button className="button primary on-dark" onClick={() => choosePractice(nextPrompt)}>Open practice room</button>
+              {/* Mock had exactly one inbound link, on a panel that only appears
+                  in the three weeks the syllabus schedules a mock module. The
+                  written and the spoken form of the same attempt belong side by
+                  side, on every day. */}
+              <button className="text-button inverted" onClick={() => selectView("mock")}>Or run it spoken →</button>
+            </div>
           </aside>
+
+          {mockModules.length > 0 ? (
+            <section className="paper-panel mock-call" aria-labelledby="mock-call-heading">
+              <div>
+                <p className="eyebrow">Week {currentWeek.week} schedules a spoken mock</p>
+                <h2 id="mock-call-heading">
+                  {mockModules.length} mock module{mockModules.length === 1 ? "" : "s"} this week
+                  {mockModulesLeft.length === 0 ? " · all complete" : ""}
+                </h2>
+                <p>
+                  {mockModulesLeft.length > 0
+                    ? `Next up: ${mockModulesLeft[0].title}. Say the answer out loud against a drawn prompt and a stage checklist — reading it back silently is a different skill.`
+                    : "You have finished this week's mock modules. Draw a fresh prompt and run one more against the clock."}
+                </p>
+                <p className="mock-call-log">
+                  {study.mock.log.length === 0
+                    ? "No spoken mock logged yet."
+                    : `${study.mock.log.length} spoken mock${study.mock.log.length === 1 ? "" : "s"} logged · last ${study.mock.log[0].date}`}
+                </p>
+              </div>
+              <div className="mock-call-actions">
+                <button className="button primary" onClick={() => selectView("mock")}>Open the mock room</button>
+                {mockModulesLeft.length > 0 ? (
+                  <button className="button quiet" onClick={() => openTopic(mockModulesLeft[0].id)}>
+                    Read module {mockModulesLeft[0].day} first
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
 
           <section className="paper-panel framework-panel" aria-labelledby="framework-heading">
             <div className="section-heading">
@@ -1389,6 +2147,10 @@ export default function Home() {
           {curriculumWeeks.map((week) => {
             const weekTopics = allTopics.filter((topic) => topic.week === week.week);
             const finished = weekTopics.filter((topic) => study.topics[topic.id]?.status === "completed").length;
+            // Curriculum had 53 buttons and not one of them was primary: an
+            // expanded week offered a flat grid with no "and the thing to do
+            // here is this". The first unfinished module is that thing.
+            const weekNext = weekTopics.find((topic) => study.topics[topic.id]?.status !== "completed");
             return (
               <details className="week-row" key={week.week} open={week.week === currentWeek.week}>
                 <summary>
@@ -1420,9 +2182,19 @@ export default function Home() {
                       <button key={topic.id} onClick={() => openTopic(topic.id)}>
                         <span>Module {topic.day}</span>
                         <strong>{topic.title}</strong>
-                        <small>{study.topics[topic.id]?.status.replace("-", " ")} · {topic.estimatedMinutes} min</small>
+                        <small>{statusLabel(study.topics[topic.id]?.status ?? "not-started")} · {topic.estimatedMinutes} min</small>
                       </button>
                     ))}
+                  </div>
+                  <div className="week-commit">
+                    {weekNext ? (
+                      <button className="button primary" onClick={() => openTopic(weekNext.id)}>
+                        {finished === 0 ? `Start module ${weekNext.day}` : `Continue with module ${weekNext.day}`}
+                      </button>
+                    ) : (
+                      <button className="button" onClick={() => openTopic(weekTopics[0].id)}>Revisit module 1</button>
+                    )}
+                    <span className="section-note">{weekNext ? weekNext.title : `Week ${week.week} complete`}</span>
                   </div>
                 </div>
               </details>
@@ -1446,38 +2218,35 @@ export default function Home() {
     const markFailures = createSectionMarker(activeTopic.glossary);
     const markQuestions = createSectionMarker(activeTopic.glossary);
     const markChecklist = createSectionMarker(activeTopic.glossary);
+    const markConcepts = createSectionMarker(activeTopic.glossary);
+    const activeWeek = curriculumWeeks.find((week) => week.week === activeTopic.week);
+    // "Next" has to mean what is actually next for this learner. Incrementing
+    // the index blindly sends someone who worked out of order straight back
+    // into a module they already finished, so prefer the first unfinished one
+    // after this and say plainly which of the two the button is offering.
+    const topicIndex = allTopics.findIndex((item) => item.id === activeTopic.id);
+    const immediateNext = allTopics[topicIndex + 1];
+    const nextTopic = allTopics.slice(topicIndex + 1).find((item) => study.topics[item.id]?.status !== "completed")
+      ?? immediateNext;
     return (
       <section aria-labelledby="topic-title">
-        <div className="topic-week-tabs" aria-label="Curriculum week">
-          {curriculumWeeks.map((week) => (
-            <button
-              key={week.week}
-              className={week.week === topicWeek ? "active" : ""}
-              onClick={() => chooseTopicWeek(week.week)}
-              aria-pressed={week.week === topicWeek}
-            >
-              <span>W{String(week.week).padStart(2, "0")}</span>
-              <strong>{week.title}</strong>
-            </button>
-          ))}
-        </div>
-
-        <div className="topic-picker" aria-label={`Week ${topicWeek} modules`}>
-          {visibleTopicWeek.map((topic) => (
-            <button
-              key={topic.id}
-              className={topic.id === activeTopic.id ? "active" : ""}
-              onClick={() => setActiveTopicId(topic.id)}
-              aria-pressed={topic.id === activeTopic.id}
-            >
-              <span>M{topic.day}</span>{topic.title}
-            </button>
-          ))}
-        </div>
+        {/* The module page had no route back up to the syllabus it belongs to:
+            Curriculum was reachable only from the sidebar. */}
+        <nav className="topic-breadcrumb" aria-label="Breadcrumb">
+          <button className="text-button" onClick={() => selectView("curriculum")}>Curriculum</button>
+          <span aria-hidden="true">/</span>
+          {/* Context, not a link: the week tabs immediately below already own
+              "switch week", and a crumb that jumped you to a different module
+              would be a navigation dressed up as a location. */}
+          <span>Week {String(activeTopic.week).padStart(2, "0")} · {activeWeek?.title ?? "This week"}</span>
+          <span aria-hidden="true">/</span>
+          {/* Absorbed the header eyebrow, which said the same week and module
+              number 400px further down. */}
+          <span aria-current="page">Module {activeTopic.day} · {activeTopic.estimatedMinutes} min</span>
+        </nav>
 
         <div className="topic-header">
           <div>
-            <p className="eyebrow">Week {activeTopic.week} · Module {activeTopic.day} · {activeTopic.estimatedMinutes} minutes</p>
             <h1 id="topic-title">{activeTopic.title}</h1>
             <p>{activeTopic.summary}</p>
             <div className="topic-context">
@@ -1486,8 +2255,22 @@ export default function Home() {
             </div>
           </div>
           <div className="topic-controls">
-            <span className="mini-label">Confidence</span>
-            <div className="confidence-picker" aria-label="Confidence from 1 to 5">
+            {/* Nothing is pressed until the learner presses it, so the label has
+                to say which of the two states this is. */}
+            <span className="mini-label">
+              Confidence
+              <em className="control-state">
+                {topicProgress.confidence === null ? "Not rated" : `${topicProgress.confidence}/5`}
+              </em>
+            </span>
+            <div
+              className="confidence-picker"
+              role="group"
+              aria-label={topicProgress.confidence === null
+                ? "Confidence from 1 to 5, not rated yet"
+                : `Confidence from 1 to 5, currently ${topicProgress.confidence}`}
+              data-rated={topicProgress.confidence !== null}
+            >
               {[1, 2, 3, 4, 5].map((value) => (
                 <button
                   key={value}
@@ -1496,14 +2279,88 @@ export default function Home() {
                 >{value}</button>
               ))}
             </div>
-            <button
-              className={`button ${topicProgress.status === "completed" ? "quiet" : "primary"}`}
-              onClick={() => updateTopic(activeTopic.id, { status: topicProgress.status === "completed" ? "in-progress" : "completed" })}
-            >
-              {topicProgress.status === "completed" ? "Mark in progress" : "Mark complete"}
-            </button>
+            <div className="topic-status-row">
+              {/* Completion used to be confirmed only by the button relabelling
+                  itself. The chip states the module's status in its own words. */}
+              <span className={`status-mark ${topicProgress.status}`} data-status={topicProgress.status}>
+                {topicProgress.status === "completed" ? "✓ " : ""}{statusLabel(topicProgress.status)}
+              </span>
+              <button
+                className={`button ${topicProgress.status === "completed" ? "quiet" : "primary"}`}
+                onClick={() => updateTopic(activeTopic.id, { status: topicProgress.status === "completed" ? "in-progress" : "completed" })}
+              >
+                {topicProgress.status === "completed" ? "Mark in progress" : "Mark complete"}
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Both switchers moved below the title. Navigation to a module you are
+            not reading is not the first thing a module page has to say. */}
+        <div className="topic-switcher">
+          <div className="topic-week-chips" role="group" aria-label="Curriculum week">
+            {curriculumWeeks.map((week) => {
+              const current = week.week === topicWeek;
+              return (
+                <button
+                  key={week.week}
+                  className={current ? "active" : ""}
+                  onClick={() => chooseTopicWeek(week.week)}
+                  aria-pressed={current}
+                >
+                  <span>W{String(week.week).padStart(2, "0")}</span>
+                  {/* Only the week you are on spells its title out. The other
+                      eleven keep theirs for screen readers, which cannot infer
+                      "Observability" from "W07". */}
+                  {current
+                    ? <strong>{week.title}</strong>
+                    : <em className="sr-only">{week.title}</em>}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="topic-picker" role="group" aria-label={`Week ${topicWeek} modules`}>
+            {visibleTopicWeek.map((topic) => {
+              const status = study.topics[topic.id]?.status ?? "not-started";
+              return (
+                <button
+                  key={topic.id}
+                  className={topic.id === activeTopic.id ? "active" : ""}
+                  onClick={() => setActiveTopicId(topic.id)}
+                  aria-pressed={topic.id === activeTopic.id}
+                  data-status={status}
+                >
+                  {/* The chip is the one part of the page still on screen after
+                      marking complete, so completion has to show here too. */}
+                  <span>{status === "completed" ? "✓" : `M${topic.day}`}</span>
+                  {topic.title}
+                  {status === "completed" ? <em className="sr-only">completed</em> : null}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* The module's own contents. Eight foldable sections with no anchors
+            made "go and read the trade-offs" a scroll hunt through four screens
+            of primer; each chip jumps to its section and opens it if closed. */}
+        <nav className="topic-subrail" aria-label="Sections in this module" ref={subrailRef} data-fade={subrailFade}>
+          {topicSectionOrder.map((id) => {
+            const open = isSectionOpen(id);
+            return (
+              <button
+                key={id}
+                data-open={open}
+                aria-expanded={open}
+                aria-controls={`topic-section-${id}`}
+                onClick={() => jumpToSection(id)}
+              >
+                {topicSections[id].short}
+              </button>
+            );
+          })}
+        </nav>
 
         <div className="topic-grid">
           <article className="topic-why topic-wide">
@@ -1518,7 +2375,14 @@ export default function Home() {
           </article>
           <article className="paper-panel">
             <p className="eyebrow">Core concepts</p>
-            <ul className="tag-list large">{activeTopic.concepts.map((item) => <li key={item}>{item}</li>)}</ul>
+            {/* This panel used to restate, without definitions, a subset of a
+                glossary 5,000px below it. Running the chips through the same
+                marker the prose uses turns the restatement into the definition:
+                ~71% of them are glossary terms, and those now answer in place
+                instead of pointing at a list nobody scrolls to. */}
+            <ul className="tag-list large">
+              {activeTopic.concepts.map((item) => <li key={item}><Prose nodes={markConcepts(item)} /></li>)}
+            </ul>
           </article>
 
           <Section id="primer" note="No background assumed" className="primer-panel">
@@ -1639,6 +2503,12 @@ export default function Home() {
                       {question.options.map((option, optionIndex) => {
                         const isCorrect = answered && optionIndex === question.answerIndex;
                         const isWrong = answered && optionIndex === selected && optionIndex !== question.answerIndex;
+                        // Colour alone cannot carry the verdict: the letter becomes a
+                        // mark and the state is spelled out for screen readers and for
+                        // anyone who cannot separate the mint and pink washes.
+                        const verdict = isCorrect
+                          ? (optionIndex === selected ? "Correct — your answer" : "Correct answer")
+                          : isWrong ? "Your answer — incorrect" : null;
                         return (
                           <button
                             type="button"
@@ -1648,7 +2518,10 @@ export default function Home() {
                             disabled={answered}
                             aria-pressed={answered ? optionIndex === selected : undefined}
                           >
-                            <span>{String.fromCharCode(65 + optionIndex)}</span>{option}
+                            <span className="quiz-mark" aria-hidden="true">
+                              {isCorrect ? "✓" : isWrong ? "✗" : String.fromCharCode(65 + optionIndex)}
+                            </span>
+                            <span>{option}{verdict ? <em className="quiz-verdict">{verdict}</em> : null}</span>
                           </button>
                         );
                       })}
@@ -1662,7 +2535,7 @@ export default function Home() {
 
           <article className="exercise-card topic-wide">
             <div><p className="eyebrow inverted">Component exercise</p><h2>{activeTopic.exercise}</h2></div>
-            <button className="button light" onClick={openTopicExercise}>Open workspace</button>
+            <button className="button primary on-dark" onClick={openTopicExercise}>Open workspace</button>
           </article>
 
           {activeTopic.furtherReading?.length ? (
@@ -1684,6 +2557,58 @@ export default function Home() {
             />
             <p className="save-hint">Saved on this device as you type.</p>
           </article>
+
+          {/* The page used to end here, ~6,900px below "Mark complete", with
+              nothing to press. Every action the end of a module implies now
+              lives at the end of the module. */}
+          <article className="paper-panel topic-wide topic-next">
+            <div className="topic-next-copy">
+              <p className="eyebrow">End of module</p>
+              <h2>
+                {topicProgress.status === "completed"
+                  ? "Module complete. Keep the loop going."
+                  : "Finished reading? Close it out."}
+              </h2>
+              <p>
+                {topicProgress.status === "completed"
+                  ? "Recall is what makes it stick — drill the cards now, then take the next module."
+                  : "Mark it done, drill its cards while the material is fresh, or move on and come back."}
+              </p>
+            </div>
+            <div className="topic-next-actions">
+              {topicProgress.status === "completed" ? null : (
+                <button
+                  className="button primary"
+                  onClick={() => updateTopic(activeTopic.id, { status: "completed" })}
+                >
+                  Mark complete
+                </button>
+              )}
+              {topicCards.length ? (
+                <button className="button quiet" onClick={() => startRecall("topic")}>
+                  Drill {topicCards.length} cards
+                </button>
+              ) : null}
+            </div>
+            {nextTopic ? (
+              <button className="topic-next-link" onClick={() => openTopic(nextTopic.id)}>
+                <span>{nextTopic.id === immediateNext?.id ? "Next module" : "Next unfinished module"}</span>
+                <strong>{nextTopic.title}</strong>
+                <small>
+                  Week {nextTopic.week} · Module {nextTopic.day} · {nextTopic.estimatedMinutes} min ·{" "}
+                  {statusLabel(study.topics[nextTopic.id]?.status ?? "not-started")}
+                </small>
+                <em aria-hidden="true">→</em>
+              </button>
+            ) : (
+              <button className="topic-next-link" onClick={() => selectView("curriculum")}>
+                <span>Last module in the syllabus</span>
+                <strong>Back to the {curriculumWeeks.length}-week curriculum</strong>
+                <small>Pick any week to revisit, or run a mock</small>
+                <em aria-hidden="true">→</em>
+              </button>
+            )}
+          </article>
         </div>
       </section>
     );
@@ -1693,15 +2618,23 @@ export default function Home() {
     const graded = sessionSeen.length;
     const remaining = recallQueue.length;
     const scheduled = activeCard ? study.srs[activeCard.key] : undefined;
+    // The honest-grading sermon is a first-session artifact. Once there is a
+    // real schedule to read, it is 100px of instructions the learner has
+    // already followed, sitting between them and the card.
+    const firstSession = Object.keys(study.srs).length === 0;
 
     return (
       <section aria-labelledby="recall-title">
-        <div className="page-intro">
+        <div className="page-intro" data-terse={!firstSession}>
           <div>
             <p className="eyebrow">Retrieval practice</p>
             <h1 id="recall-title">Answer first. Then reveal.</h1>
           </div>
-          <p>Say the answer out loud before revealing it. Grading yourself honestly is what sets the next interval—marking a card you fumbled as Good is only cheating the schedule.</p>
+          {firstSession ? (
+            <p>Say the answer out loud before revealing it. Grading yourself honestly is what sets the next interval—marking a card you fumbled as Good is only cheating the schedule.</p>
+          ) : (
+            <p className="page-intro-terse">Out loud, then reveal. Grade what actually happened.</p>
+          )}
         </div>
 
         <div className="recall-toolbar">
@@ -1749,7 +2682,7 @@ export default function Home() {
                 <p>{activeCard.answer}</p>
               </div>
             ) : (
-              <button className="button primary recall-reveal" onClick={() => setRecallRevealed(true)}>
+              <button className="button primary recall-reveal" onClick={revealAnswer}>
                 Reveal answer <kbd>space</kbd>
               </button>
             )}
@@ -1775,7 +2708,10 @@ export default function Home() {
                 : "This module has no cards left in the current session."}
             </p>
             <div className="hero-actions">
-              <button className="button quiet" onClick={() => selectView("topic")}>Back to topic lab</button>
+              {/* The empty queue used to offer two identical quiet buttons and
+                  no answer to "so what do I do now". Starting a module is what
+                  fills the queue, so that is the primary. */}
+              <button className="button primary" onClick={() => selectView("topic")}>Back to topic lab</button>
               {recallScope === "topic" ? <button className="button quiet" onClick={() => startRecall("due")}>Review due cards</button> : null}
             </div>
           </article>
@@ -1792,7 +2728,7 @@ export default function Home() {
           <p>Use one significant digit. The architectural consequence matters more than a perfectly precise answer.</p>
         </div>
 
-        <div className="drill-tabs" role="tablist" aria-label="Estimation drills">
+        <div className="drill-tabs" role="tablist" aria-label="Estimation drills" ref={drillStripRef} data-fade={drillStripFade}>
           {estimationDrills.map((drill, index) => (
             <button
               key={drill.id}
@@ -1839,7 +2775,7 @@ export default function Home() {
               id="drill-answer"
               className="lined-textarea tall"
               value={drillAnswer}
-              onChange={(event) => setDrillAnswer(event.target.value)}
+              onChange={(event) => updateDrillAnswer(activeDrill.id, event.target.value)}
               placeholder={'Assumptions:\n\nCalculation:\n\nApproximate answer:\n\nWhat this changes:'}
             />
             <button
@@ -1875,6 +2811,11 @@ export default function Home() {
   }
 
   function renderPractice() {
+    // An empty canvas used to count as a skipped step, which was never true:
+    // the Architecture textarea on the same step records the same attempt, and
+    // the canvas is pointer-only, so a keyboard user could not clear the gate
+    // at all. Either one counts as having attempted the design.
+    const architectureAttempted = study.draft.sketch.length > 0 || study.draft.fields.architecture.trim().length > 0;
     return (
       <section aria-labelledby="practice-title">
         <div className="practice-topbar">
@@ -1884,7 +2825,7 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="practice-category-tabs" aria-label="Design category">
+        <div className="practice-category-tabs" role="group" aria-label="Design category">
           {(["classic", "ml", "llm"] as DesignCategory[]).map((category) => (
             <button
               key={category}
@@ -1902,7 +2843,7 @@ export default function Home() {
           ))}
         </div>
 
-        <div className="prompt-switcher" aria-label="Design prompt">
+        <div className="prompt-switcher" role="group" aria-label="Design prompt" ref={promptStripRef} data-fade={promptStripFade}>
           {visiblePrompts.map((prompt) => (
             <button
               key={prompt.id}
@@ -1931,12 +2872,22 @@ export default function Home() {
         <div className="practice-workbar">
           <span className="workbar-title">{activePrompt.title}</span>
           <div className="timer-cluster">
-            <span className="timer" aria-label={`${Math.ceil(secondsLeft / 60)} minutes remaining`}>{formatTimer(secondsLeft)}</span>
-            <button className="button primary" onClick={toggleTimer}>{study.draft.deadline ? "Pause" : secondsLeft === activePrompt.durationMinutes * 60 ? "Start timer" : "Resume"}</button>
+            <span
+              className="timer"
+              role="timer"
+              data-expired={secondsLeft === 0}
+              aria-label={secondsLeft === 0 ? "Time is up" : `${Math.floor(secondsLeft / 60)} minutes ${secondsLeft % 60} seconds remaining`}
+            >
+              {formatTimer(secondsLeft)}
+            </span>
+            <span className="sr-only" role="status" aria-live="polite">{timerAnnouncement}</span>
+            <button className="button primary" onClick={toggleTimer}>
+              {study.draft.deadline ? "Pause" : secondsLeft === 0 ? "Start again" : secondsLeft === activePrompt.durationMinutes * 60 ? "Start timer" : "Resume"}
+            </button>
             <button className="button quiet" onClick={resetTimer}>Reset</button>
           </div>
         </div>
-        <nav className="practice-step-tabs" aria-label="Interview phases">
+        <nav className="practice-step-tabs" aria-label="Interview phases" ref={stepStripRef} data-fade={stepStripFade}>
           {practiceSteps.map((step, index) => {
             const filled = step.fields.filter((field) => study.draft.fields[field].trim().length > 0).length;
             return (
@@ -1948,7 +2899,7 @@ export default function Home() {
               >
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <strong>{step.label}</strong>
-                <small>{step.minutes}{step.minutes === "after" ? "" : "m"}</small>
+                <small>{stepMinutes(step, activePrompt.durationMinutes)}</small>
                 {step.fields.length > 0 ? (
                   <i className={filled === step.fields.length ? "done" : filled > 0 ? "partial" : ""} aria-hidden="true" />
                 ) : null}
@@ -1964,7 +2915,7 @@ export default function Home() {
               const field = practiceFields.find((item) => item.id === fieldId)!;
               return (
                 <label className={`editor-field ${activeStep.fields.length === 1 ? "wide" : ""}`} key={field.id}>
-                  <span>{field.label}</span>
+                  <span className="field-label">{field.label}</span>
                   <textarea
                     value={study.draft.fields[field.id]}
                     onChange={(event) => updateDraftField(field.id, event.target.value)}
@@ -1988,7 +2939,8 @@ export default function Home() {
           </div>
           <p className="sketch-note">
             The interview is a drawing exercise. Sketch components and the flow between them before you reveal the reference—
-            a diagram you cannot draw from memory is one you do not yet own.
+            a diagram you cannot draw from memory is one you do not yet own. The Architecture field above is an equally valid
+            record of the same attempt if you would rather write the boxes and arrows out.
           </p>
           <SketchPad
             strokes={study.draft.sketch}
@@ -2005,18 +2957,18 @@ export default function Home() {
             <p className="eyebrow inverted">Calibration guide</p>
             <h2 id="reference-heading">Compare against a senior-level reference.</h2>
             <p>
-              {study.draft.sketch.length === 0 && !referenceRevealed
-                ? "Sketch the architecture above first—comparing before attempting turns practice into reading."
+              {!architectureAttempted && !referenceRevealed
+                ? "Draw or write the architecture first—comparing before attempting turns practice into reading."
                 : "Attempt the design first. The guide is a decision map—not the only valid architecture."}
             </p>
           </div>
           <button
-            className="button light"
+            className="button primary on-dark"
             onClick={() => setReferenceRevealed((value) => !value)}
             aria-expanded={referenceRevealed}
             aria-controls="reference-solution"
           >
-            {referenceRevealed ? "Hide reference" : study.draft.sketch.length === 0 ? "Reveal anyway" : "Reveal reference"}
+            {referenceRevealed ? "Hide reference" : architectureAttempted ? "Reveal reference" : "Reveal anyway"}
           </button>
           <span className="sr-only" role="status" aria-live="polite">
             {referenceRevealed ? "Reference solution revealed." : ""}
@@ -2109,11 +3061,25 @@ export default function Home() {
         </section>
 
         <section className="paper-panel checklist-section">
-          <details>
-            <summary>20-question reliability and trade-off checklist</summary>
+          {/* The ticks live on the draft, so they survive a step change, a view
+              change and a reload — and they are saved with the attempt. */}
+          <details open={checklistOpen} onToggle={(event) => setChecklistOpen(event.currentTarget.open)}>
+            <summary>
+              20-question reliability and trade-off checklist
+              <em className="control-state">{checklistTicked} of {standardQuestions.length} checked</em>
+            </summary>
             <ol className="standard-checklist">
               {standardQuestions.map((question) => (
-                <li key={question.id}><label><input type="checkbox" /> <span>{question.text}</span></label></li>
+                <li key={question.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={study.draft.checklist[String(question.id)] === true}
+                      onChange={(event) => toggleChecklistQuestion(String(question.id), event.target.checked)}
+                    />
+                    <span>{question.text}</span>
+                  </label>
+                </li>
               ))}
             </ol>
           </details>
@@ -2127,7 +3093,13 @@ export default function Home() {
         ) : null}
 
         <div className="sticky-savebar">
-          <p aria-live="polite">{saveNotice || "Draft changes are stored locally as you type."}</p>
+          {/* The live region stays mounted whether or not it has a message:
+              inserting a live region together with its text is unreliably
+              announced. The idle hint is what gives way instead. */}
+          <div className="savebar-copy">
+            {renderNotice("practice")}
+            {notice?.slot === "practice" ? null : <p className="savebar-hint">Draft changes are stored locally as you type.</p>}
+          </div>
           <button className="button primary" onClick={saveAttempt}>Save scored attempt</button>
         </div>
 
@@ -2152,8 +3124,18 @@ export default function Home() {
   function renderMock() {
     return (
       <section aria-labelledby="mock-title">
-        <div className="page-intro">
-          <div><p className="eyebrow">Spoken practice</p><h1 id="mock-title">Run the interview, not the notes.</h1></div>
+        <div className="page-intro" data-terse={study.mock.log.length > 0 ? "true" : undefined}>
+          <div>
+            <p className="eyebrow">Spoken practice</p>
+            <h1 id="mock-title">
+              {study.mock.log.length === 0
+                ? "Run the interview, not the notes."
+                : `${study.mock.log.length} spoken mock${study.mock.log.length === 1 ? "" : "s"} on record.`}
+            </h1>
+            {study.mock.log.length > 0 ? (
+              <p className="page-intro-terse">Last run {study.mock.log[0].date} · {mockLogTitle}</p>
+            ) : null}
+          </div>
           <button className="button quiet" onClick={randomizeMock}>Draw another prompt</button>
         </div>
         <article className="mock-card">
@@ -2161,21 +3143,35 @@ export default function Home() {
             <div className="ticket-meta"><span>{mockPrompt.category}</span><span>{mockPrompt.difficulty}</span><span>{mockPrompt.durationMinutes} min</span></div>
             <h2>{mockPrompt.title}</h2>
             <p>{mockPrompt.prompt}</p>
-            <button className="button light" onClick={() => choosePractice(mockPrompt)}>Start this mock</button>
+            <button className="button primary on-dark" onClick={() => choosePractice(mockPrompt)}>Start this mock</button>
           </div>
           <div className="mock-phases">
-            <p className="eyebrow inverted">Stage checklist</p>
+            <p className="eyebrow inverted">
+              Stage checklist
+              <em className="control-state inverted">
+                {mockChecked} of {interviewPhases.length} done
+              </em>
+            </p>
             {interviewPhases.map((phase) => (
               <label key={phase.id}>
                 <input
                   type="checkbox"
-                  checked={Boolean(mockChecks[phase.id])}
-                  onChange={(event) => setMockChecks((current) => ({ ...current, [phase.id]: event.target.checked }))}
+                  checked={study.mock.checks[phase.id] === true}
+                  onChange={(event) => toggleMockPhase(phase.id, event.target.checked)}
                 />
                 <span><strong>{phase.label}</strong><small>{phase.description}</small></span>
                 <em>{phaseMinutes(phase.share, mockPrompt.durationMinutes)}m</em>
               </label>
             ))}
+            {/* The ticks used to be a list that erased itself on the next draw.
+                Closing the mock is now a write: it counts towards the streak,
+                shows on Today, and clears the board for the next attempt. */}
+            <div className="mock-commit">
+              <button className="button primary on-dark" onClick={logMock} disabled={mockChecked === 0}>
+                {mockChecked === interviewPhases.length ? "Log this mock as done" : `Log this mock (${mockChecked}/${interviewPhases.length})`}
+              </button>
+              {renderNotice("mock")}
+            </div>
           </div>
         </article>
         <div className="topic-grid">
@@ -2197,7 +3193,7 @@ export default function Home() {
               <h2>{mockPrompt.followUpQuestions.length} questions they will push on</h2>
             </div>
             <button
-              className="button light"
+              className="button primary"
               onClick={() => setFollowUpsShown((shown) => !shown)}
               aria-expanded={followUpsShown}
               aria-controls="mock-followup-list"
@@ -2223,24 +3219,27 @@ export default function Home() {
     return (
       <div className="mistake-form">
         <label>
-          <span>Category</span>
+          <span className="field-label on-dark">Category</span>
           <select value={mistakeForm.category} onChange={(event) => setMistakeForm((current) => ({ ...current, category: event.target.value as MistakeCategory }))}>
             {mistakeCategories.map((category) => <option key={category}>{category}</option>)}
           </select>
         </label>
         <label>
-          <span>What went wrong?</span>
+          <span className="field-label on-dark">What went wrong?</span>
           <input value={mistakeForm.mistake} onChange={(event) => setMistakeForm((current) => ({ ...current, mistake: event.target.value }))} placeholder="I chose a queue before stating the ordering requirement…" />
         </label>
         <label>
-          <span>Correct approach</span>
+          <span className="field-label on-dark">Correct approach</span>
           <input value={mistakeForm.correctApproach} onChange={(event) => setMistakeForm((current) => ({ ...current, correctApproach: event.target.value }))} placeholder="Ask which events require per-key ordering first…" />
         </label>
         <label>
-          <span>Review date</span>
+          <span className="field-label on-dark">Review date</span>
           <input type="date" value={mistakeForm.reviewDate} onChange={(event) => setMistakeForm((current) => ({ ...current, reviewDate: event.target.value }))} />
         </label>
-        <button className="button light" onClick={addMistake}>Add to review queue</button>
+        <div className="mistake-form-commit">
+          <button className="button primary on-dark" onClick={addMistake}>Add to review queue</button>
+          {renderNotice("mistake")}
+        </div>
       </div>
     );
   }
@@ -2299,9 +3298,32 @@ export default function Home() {
         </section>
 
         <section className="danger-zone">
-          <div><strong>Reset local study data</strong><p>Clears only this site&apos;s progress, notes, attempts, and mistakes from this browser.</p></div>
-          <button className="button danger" onClick={resetProgress}>Reset everything</button>
+          <div>
+            <strong>Your data lives in this browser only</strong>
+            <p>
+              Nothing is on a server. Download a copy before you clear this browser, change machines, or reset below —
+              the file is the only backup that outlives this profile.
+            </p>
+            {renderNotice("danger")}
+          </div>
+          <div className="danger-actions">
+            <button className="button" onClick={exportProgress}>Download my data</button>
+            <button className="button danger" onClick={resetProgress}>Reset everything</button>
+          </div>
         </section>
+
+        {/* A destroyed twelve weeks used to be announced by a message that was
+            not rendered in this view, with no way back at all. The undo is
+            offered for the rest of the session; the backup key outlives it. */}
+        {resetBackup !== null ? (
+          <section className="reset-undo" role="alert">
+            <div>
+              <strong>Everything cleared.</strong>
+              <p>A copy is held in this browser under <code>{BACKUP_KEY}</code>. Undo is available until you close the tab.</p>
+            </div>
+            <button className="button primary" onClick={undoReset}>Undo the reset</button>
+          </section>
+        ) : null}
       </section>
     );
   }
@@ -2319,6 +3341,7 @@ export default function Home() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main">Skip to content</a>
       <aside className="site-rail">
         <button className="brand" onClick={() => selectView("dashboard")} aria-label="System Design Lab home">
           <span className="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -2341,9 +3364,11 @@ export default function Home() {
       </aside>
 
       <div className="workspace">
-        <header className="site-header">
+        {/* `data-attempt` is what lets the phone header give the wordmark's
+            space to the clock, and only while there is a clock. */}
+        <header className="site-header" data-attempt={timerChipState === "off" ? undefined : timerChipState}>
           <div className="mobile-brand"><strong>System Design Lab</strong><span>W{String(currentWeek.week).padStart(2, "0")}</span></div>
-          <nav className="mobile-nav" aria-label="Mobile navigation">
+          <nav className="mobile-nav" ref={mobileNavRef} aria-label="Mobile navigation">
             {navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => selectView(item.id)} aria-current={view === item.id ? "page" : undefined}>{item.label}</button>)}
           </nav>
           <div className="header-context">
@@ -2351,7 +3376,37 @@ export default function Home() {
             <p><strong>Current focus</strong><span>Week {currentWeek.week} · {currentWeek.title}</span></p>
           </div>
           <div className="header-actions">
-            <span className="local-badge">Saved locally</span>
+            {/* A 40-minute attempt used to be invisible the moment you left the
+                design room: navigate away and no digits existed anywhere in the
+                DOM, reload and you landed on Today with a live clock running and
+                nothing to tell you. The chip is the attempt's presence in the one
+                bar that is on every view, and it is the way back to it. */}
+            {timerChipState !== "off" ? (
+              <button
+                className="timer-chip"
+                data-state={timerChipState}
+                onClick={() => selectView("practice")}
+                aria-label={
+                  timerChipState === "expired"
+                    ? `Time is up on ${activePrompt.title}. Return to the design room.`
+                    : `${Math.ceil(secondsLeft / 60)} minutes left on ${activePrompt.title}. Return to the design room.`
+                }
+              >
+                <span aria-hidden="true">{timerChipState === "expired" ? "Time" : "Running"}</span>
+                <strong aria-hidden="true">{formatTimer(secondsLeft)}</strong>
+              </button>
+            ) : null}
+            {/* Was hardcoded text. The one element in permanent view now carries
+                the state of the write it is claiming. */}
+            <span className={`local-badge state-${saveState}`} role="status" aria-live="polite">
+              {saveState === "failed"
+                ? "Save failed"
+                : saveState === "saving"
+                  ? "Saving…"
+                  : lastSavedAt !== null
+                    ? `Saved · ${savedAgo || "just now"}`
+                    : "Local only"}
+            </span>
             <button
               className="theme-toggle"
               onClick={() => setStudy((current) => ({ ...current, theme: current.theme === "light" ? "dark" : "light" }))}
@@ -2362,8 +3417,12 @@ export default function Home() {
           </div>
         </header>
 
-        <main className="site-main">
+        <main className="site-main" id="main" ref={mainRef} tabIndex={-1}>
+          <p className="sr-only" role="status" aria-live="polite">{viewAnnouncement}</p>
           {!hydrated && <p className="sr-only" aria-live="polite">Loading saved study progress.</p>}
+          {/* Storage failure is not scoped to a view, so it gets a slot that is
+              rendered on all eight. */}
+          {renderNotice("global")}
           {viewContent[view]()}
         </main>
         <footer className="site-footer"><span>System Design Interview Lab</span><p>Estimate → design → stress → reflect.</p><span>{allTopics.length} modules · local-first</span></footer>
